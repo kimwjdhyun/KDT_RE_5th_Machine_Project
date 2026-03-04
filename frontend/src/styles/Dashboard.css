@@ -1,0 +1,37 @@
+.app-container {
+  padding: 40px;
+  font-family: Arial, sans-serif;
+  background-color: #f4f7f6;
+  min-height: 100vh;
+}
+
+.main-title {
+  text-align: center;
+  margin-bottom: 40px;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.card {
+  background: white;
+  padding: 30px;
+  border-radius: 15px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.05);
+  text-align: center;
+  transition: transform 0.2s ease;
+}
+
+.card:hover {
+  transform: translateY(-5px);
+}
+
+.card-value {
+  font-size: 22px;
+  margin-top: 10px;
+  font-weight: bold;
+  color: #2e7d32;
+}

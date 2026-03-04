@@ -61,5 +61,13 @@ def stats():
         "carbon_reduction_g": round(total_power * 0.5, 2)
     })
 
+@app.route("/api/energy")
+def energy():
+    return jsonify({
+        "power": 128.5,          # 현재 발전량 kW
+        "soc": 76,               # 배터리 충전율 %
+        "carbon_saved": 32.4     # 탄소 절감량 kg
+    })
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
