@@ -1,39 +1,399 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "./styles/Dashboard.css";
-import { fetchEnergy } from "./services/api";
+import { fetchDataLog, fetchStats } from "./services/api";
 import DashboardCard from "./components/DashboardCard";
 
+import {
+  Chart as ChartJS,
+  LineElement,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  Legend,
+  Tooltip,
+  Filler
+} from "chart.js";
+import { Line } from "react-chartjs-2";
+
+ChartJS.register(LineElement, CategoryScale, LinearScale, PointElement, Legend, Tooltip, Filler);
+
+function getModeMeta(mode) {
+  if (mode === 0)
+    return { text: "🔴 긴급절전", pillCls: "mode mode-red", rowCls: "mode-red" };
+  if (mode === 1)
+    return { text: "🟡 절약모드", pillCls: "mode mode-yellow", rowCls: "mode-yellow" };
+  return { text: "🟢 풀가동", pillCls: "mode mode-green", rowCls: "mode-green" };
+}
+
+function formatCarbon(carbon_g) {
+  const n = Number(carbon_g) || 0;
+  if (n >= 1000) return `${(n / 1000).toFixed(2)} kg`;
+  return `${n.toFixed(2)} g`;
+}
+
+function formatNumber(n, digits = 2) {
+  const x = Number(n);
+  if (Number.isNaN(x)) return "-";
+  return x.toFixed(digits);
+}
+
 function App() {
-  const [energy, setEnergy] = useState(null);
+  const [log, setLog] = useState([]);
+  const [latest, setLatest] = useState(null);
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  // 다크모드
+  const [dark, setDark] = useState(false);
+
+  // ✅ 오늘의 미션
+  const missionPool = useMemo(
+    () => [
+      "🔋 배터리 지키기: SOC 20% 아래로 떨어지면 절전!",
+      "💧 급수 타이밍 체크: 토양습도 40% 기준선 지키기",
+      "📈 예측 vs 실제: 오차가 커지면 센서값부터 의심!",
+      "🌿 ESG 미션: 오늘 탄소 절감량 1kg 찍어보기",
+      "🛰 데이터 수집: 5초 주기 로그가 끊기지 않게!"
+    ],
+    []
+  );
+  const [mission, setMission] = useState(missionPool[0]);
+
+  // ✅ 히스토리: 방금 업데이트된 1개만 pop
+  const [popHistoryKey, setPopHistoryKey] = useState("");
+  const [prevLatestTs, setPrevLatestTs] = useState("");
+
+  // 미션은 25초마다 변경
+  useEffect(() => {
+    const pick = () => {
+      const idx = Math.floor(Math.random() * missionPool.length);
+      setMission(missionPool[idx]);
+    };
+    pick();
+    const id = setInterval(pick, 25000);
+    return () => clearInterval(id);
+  }, [missionPool]);
+
+  const refresh = async () => {
+    try {
+      setErrorMsg("");
+      const [logData, statsData] = await Promise.all([fetchDataLog(), fetchStats()]);
+
+      const safeLog = Array.isArray(logData) ? logData : [];
+      setLog(safeLog);
+
+      const newLatest = safeLog.length > 0 ? safeLog[safeLog.length - 1] : null;
+      setLatest(newLatest);
+
+      // ✅ 새 데이터(새 timestamp) 들어온 순간 1개만 애니메이션
+      if (newLatest?.timestamp && newLatest.timestamp !== prevLatestTs) {
+        setPopHistoryKey(newLatest.timestamp);
+        setPrevLatestTs(newLatest.timestamp);
+      }
+
+      setStats(statsData || null);
+    } catch (e) {
+      console.error(e);
+      setErrorMsg("백엔드 연결 실패: Flask 서버(5000)가 켜져있는지 확인해줘!");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const getData = async () => {
-      try {
-        const energyData = await fetchEnergy();
-        setEnergy(energyData);
-      } catch (error) {
-        console.error("API 호출 실패:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    getData();
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
   }, []);
 
-  if (loading || !energy) {
-    return <p style={{ textAlign: "center", marginTop: "100px" }}>데이터 불러오는 중...</p>;
+  // 배너 조건
+  const waterNeeded = latest ? Number(latest.soil) < 40 : false;
+  const energyLow = latest ? Number(latest.soc) < 20 || Number(latest.mode) === 0 : false;
+
+  // ✅ 아이콘 애니메이션을 “데이터 갱신 때마다” 다시 트리거
+  const iconKey = latest?.timestamp || "static";
+
+  // 상태바
+  const systemOnline = latest !== null;
+  const sensorActive = log.length > 0;
+  const aiActive = !!(latest && latest.pred_1h !== undefined);
+
+  // 차트 팔레트(테마별)
+  const chartPalette = useMemo(() => {
+    if (dark) {
+      return {
+        power: "#60a5fa",
+        pred: "#fca5a5",
+        soc: "#86efac",
+        soil: "#fbbf24",
+        baseline: "#fdba74",
+        grid: "rgba(255,255,255,0.12)",
+        tick: "rgba(229,231,235,0.85)"
+      };
+    }
+    return {
+      power: "#2563eb",
+      pred: "#dc2626",
+      soc: "#16a34a",
+      soil: "#a16207",
+      baseline: "#f97316",
+      grid: "rgba(15,23,42,0.10)",
+      tick: "rgba(15,23,42,0.75)"
+    };
+  }, [dark]);
+
+  const chartOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { bottom: 12, right: 10, left: 6 } },
+      plugins: {
+        legend: {
+          labels: { color: chartPalette.tick, boxWidth: 10, boxHeight: 10 }
+        },
+        tooltip: { enabled: true }
+      },
+      scales: {
+        x: { ticks: { color: chartPalette.tick }, grid: { color: chartPalette.grid } },
+        y: { ticks: { color: chartPalette.tick }, grid: { color: chartPalette.grid } }
+      },
+      elements: {
+        point: { radius: 2.2, hoverRadius: 4 },
+        line: { tension: 0.35, borderWidth: 2 }
+      }
+    }),
+    [chartPalette]
+  );
+
+  const labels = useMemo(() => log.map((d) => d.timestamp), [log]);
+
+  const powerChart = useMemo(() => {
+    return {
+      labels,
+      datasets: [
+        {
+          label: "발전량(kW)",
+          data: log.map((d) => d.power ?? 0),
+          borderColor: chartPalette.power,
+          backgroundColor: dark ? "rgba(96,165,250,0.10)" : "rgba(37,99,235,0.08)",
+          fill: true
+        },
+        {
+          label: "AI 예측(1h)",
+          data: log.map((d) => d.pred_1h ?? 0),
+          borderColor: chartPalette.pred,
+          backgroundColor: dark ? "rgba(252,165,165,0.08)" : "rgba(220,38,38,0.06)",
+          borderDash: [6, 6],
+          fill: true
+        }
+      ]
+    };
+  }, [labels, log, chartPalette, dark]);
+
+  const socChart = useMemo(() => {
+    return {
+      labels,
+      datasets: [
+        {
+          label: "SOC(%)",
+          data: log.map((d) => d.soc ?? 0),
+          borderColor: chartPalette.soc,
+          backgroundColor: dark ? "rgba(134,239,172,0.10)" : "rgba(22,163,74,0.08)",
+          fill: true
+        }
+      ]
+    };
+  }, [labels, log, chartPalette, dark]);
+
+  const soilChart = useMemo(() => {
+    return {
+      labels,
+      datasets: [
+        {
+          label: "토양습도(%)",
+          data: log.map((d) => d.soil ?? 0),
+          borderColor: chartPalette.soil,
+          backgroundColor: dark ? "rgba(251,191,36,0.10)" : "rgba(161,98,7,0.08)",
+          fill: true
+        },
+        {
+          label: "기준선(40%)",
+          data: log.map(() => 40),
+          borderColor: chartPalette.baseline,
+          borderDash: [5, 5],
+          fill: false
+        }
+      ]
+    };
+  }, [labels, log, chartPalette, dark]);
+
+  const modeHistory = useMemo(() => {
+    const last10 = log.slice(-10);
+    return last10
+      .map((d) => ({
+        timestamp: d.timestamp ?? "-",
+        mode: d.mode ?? 2,
+        soc: d.soc ?? 0,
+        power: d.power ?? 0,
+        pred_1h: d.pred_1h ?? 0,
+        soil: d.soil ?? 0
+      }))
+      .reverse();
+  }, [log]);
+
+  const latestMode = getModeMeta(latest?.mode);
+
+  const Title = ({ emoji, text }) => (
+    <span className="card-title-wrap">
+      <span key={`${emoji}-${iconKey}`} className="card-icon" aria-hidden="true">
+        {emoji}
+      </span>
+      <span>{text}</span>
+    </span>
+  );
+
+  if (loading) {
+    return <p style={{ textAlign: "center", marginTop: 100 }}>불러오는 중...</p>;
   }
 
   return (
-    <div className="app-container">
-      <h1 className="main-title">🌱 ESG 스마트 에너지 대시보드</h1>
+    <div className={`app-container capture ${dark ? "theme-dark" : "theme-light"}`}>
+      <div className="bg-doodles" aria-hidden="true" />
 
-      <div className="card-grid">
-        <DashboardCard title="⚡ 현재 발전량" value={`${energy.power} kW`} />
-        <DashboardCard title="🔋 배터리 충전율" value={`${energy.soc} %`} />
-        <DashboardCard title="🌿 탄소 절감량" value={`${energy.carbon_saved} kg`} />
+      <div className="topbar">
+        <div className="title-wrap">
+          <span className="live-dot" title="LIVE" />
+          <h1 className="main-title">🌱 AI · ESG 스마트 에너지 대시보드</h1>
+          <span className="tiny-tag">eco + iot + ml</span>
+          <span className="mission-badge" title="오늘의 미션">
+            {mission}
+          </span>
+        </div>
+
+        <button
+          className="theme-toggle"
+          type="button"
+          onClick={() => setDark((v) => !v)}
+          aria-label="Toggle dark mode"
+          title="다크모드"
+        >
+          {dark ? "🌙" : "☀️"}
+        </button>
+      </div>
+
+      {/* ✅ 시스템 상태바 */}
+      <div className="system-status">
+        <span className={`status-pill ${systemOnline ? "status-on" : "status-off"}`}>
+          {systemOnline ? "🟢 System Online" : "🔴 System Offline"}
+        </span>
+
+        <span className={`status-pill ${sensorActive ? "status-on" : "status-off"}`}>
+          {sensorActive ? "📡 Sensor Stream Active" : "📡 Sensor Waiting"}
+        </span>
+
+        <span className={`status-pill ${aiActive ? "status-on" : "status-off"}`}>
+          {aiActive ? "🤖 AI Prediction Running" : "🤖 AI Idle"}
+        </span>
+      </div>
+
+      {errorMsg && <div className="error-banner">⚠ {errorMsg}</div>}
+
+      {(waterNeeded || energyLow) && (
+        <div className="status-badges">
+          {waterNeeded && <div className="badge badge-water">💧 급수 필요! (토양습도 40% 미만)</div>}
+          {energyLow && <div className="badge badge-energy">⚡ 에너지 부족! (SOC 20% 미만)</div>}
+        </div>
+      )}
+
+      <div className="main-layout">
+        <div className="left-panel">
+          <DashboardCard
+            title={<Title emoji="⚡" text="현재 발전량" />}
+            value={latest ? `${formatNumber(latest.power)} kW` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="🤖" text="AI 1시간 예측" />}
+            value={latest ? `${formatNumber(latest.pred_1h)} kW` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="🔋" text="배터리 SOC" />}
+            value={latest ? `${formatNumber(latest.soc, 0)} %` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="🌡" text="토양습도" />}
+            value={latest ? `${formatNumber(latest.soil, 0)} %` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="⚙" text="에너지 모드" />}
+            value={latest ? <span className={latestMode.pillCls}>{latestMode.text}</span> : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="📦" text="총 발전량" />}
+            value={stats ? `${formatNumber(stats.total_generation)} kW` : "0.00 kW"}
+          />
+          <DashboardCard
+            title={<Title emoji="🌿" text="탄소 절감량" />}
+            value={stats ? formatCarbon(stats.carbon_reduction_g) : "0.00 g"}
+          />
+        </div>
+
+        <div className="right-panel">
+          <div className="chart-card chart-h">
+            <h2 className="section-title">📈 발전량 vs AI 예측</h2>
+            <div className="chart-box">
+              <Line data={powerChart} options={chartOptions} />
+            </div>
+          </div>
+
+          <div className="chart-card chart-h">
+            <h2 className="section-title">🔋 SOC 변화</h2>
+            <div className="chart-box">
+              <Line data={socChart} options={chartOptions} />
+            </div>
+          </div>
+
+          <div className="chart-card chart-h chart-span">
+            <h2 className="section-title">🌡 토양습도 모니터링</h2>
+            <div className="chart-box">
+              <Line data={soilChart} options={chartOptions} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bottom-panel">
+        <h2 className="section-title">🧾 최근 모드 변화 히스토리 (최신 10개)</h2>
+
+        <div className="chart-card">
+          {modeHistory.length === 0 ? (
+            <p style={{ opacity: 0.7 }}>아직 데이터가 없습니다. 시뮬레이터(/sim/start)를 켜주세요!</p>
+          ) : (
+            <ul className="history-list">
+              {modeHistory.map((row) => {
+                const m = getModeMeta(row.mode);
+
+                return (
+                  <li
+                    className={`history-item ${m.rowCls} ${
+                      row.timestamp === popHistoryKey ? "history-pop" : ""
+                    }`}
+                    key={row.timestamp}
+                  >
+                    <span className="history-time">{row.timestamp}</span>
+                    <strong className="history-mode">{m.text}</strong>
+                    <span className="history-meta">
+                      SOC {formatNumber(row.soc, 0)}% · 발전 {formatNumber(row.power)}kW · 예측{" "}
+                      {formatNumber(row.pred_1h)}kW · 토양 {formatNumber(row.soil, 0)}%
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <p className="footer-note">5초마다 자동 갱신됩니다 ⏱</p>
       </div>
     </div>
   );
