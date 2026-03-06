@@ -47,7 +47,7 @@ function App() {
   // 다크모드
   const [dark, setDark] = useState(false);
 
-  // ✅ 오늘의 미션
+  // 오늘의 미션
   const missionPool = useMemo(
     () => [
       "🔋 배터리 지키기: SOC 20% 아래로 떨어지면 절전!",
@@ -60,11 +60,17 @@ function App() {
   );
   const [mission, setMission] = useState(missionPool[0]);
 
-  // ✅ 히스토리: 방금 업데이트된 1개만 pop
+  // 히스토리: 방금 업데이트된 1개만 pop
   const [popHistoryKey, setPopHistoryKey] = useState("");
   const [prevLatestTs, setPrevLatestTs] = useState("");
 
-  // 미션은 25초마다 변경
+  // 모드 변경 토스트
+  const [prevMode, setPrevMode] = useState(null);
+  const [toast, setToast] = useState({ show: false, text: "", type: "info" });
+
+  // 데모 모드 상태
+  const [demoRunning, setDemoRunning] = useState(false);
+
   useEffect(() => {
     const pick = () => {
       const idx = Math.floor(Math.random() * missionPool.length);
@@ -74,6 +80,14 @@ function App() {
     const id = setInterval(pick, 25000);
     return () => clearInterval(id);
   }, [missionPool]);
+
+  const showToast = (text, type = "info") => {
+    setToast({ show: true, text, type });
+    window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => {
+      setToast((v) => ({ ...v, show: false }));
+    }, 1700);
+  };
 
   const refresh = async () => {
     try {
@@ -86,10 +100,20 @@ function App() {
       const newLatest = safeLog.length > 0 ? safeLog[safeLog.length - 1] : null;
       setLatest(newLatest);
 
-      // ✅ 새 데이터(새 timestamp) 들어온 순간 1개만 애니메이션
       if (newLatest?.timestamp && newLatest.timestamp !== prevLatestTs) {
         setPopHistoryKey(newLatest.timestamp);
         setPrevLatestTs(newLatest.timestamp);
+      }
+
+      if (newLatest && typeof newLatest.mode !== "undefined") {
+        if (prevMode === null) {
+          setPrevMode(newLatest.mode);
+        } else if (newLatest.mode !== prevMode) {
+          const from = getModeMeta(prevMode).text;
+          const to = getModeMeta(newLatest.mode).text;
+          showToast(`⚙ 모드 변경: ${from} → ${to}`, "mode");
+          setPrevMode(newLatest.mode);
+        }
       }
 
       setStats(statsData || null);
@@ -107,19 +131,15 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // 배너 조건
   const waterNeeded = latest ? Number(latest.soil) < 40 : false;
   const energyLow = latest ? Number(latest.soc) < 20 || Number(latest.mode) === 0 : false;
 
-  // ✅ 아이콘 애니메이션을 “데이터 갱신 때마다” 다시 트리거
   const iconKey = latest?.timestamp || "static";
 
-  // 상태바
   const systemOnline = latest !== null;
   const sensorActive = log.length > 0;
   const aiActive = !!(latest && latest.pred_1h !== undefined);
 
-  // 차트 팔레트(테마별)
   const chartPalette = useMemo(() => {
     if (dark) {
       return {
@@ -237,7 +257,10 @@ function App() {
         soc: d.soc ?? 0,
         power: d.power ?? 0,
         pred_1h: d.pred_1h ?? 0,
-        soil: d.soil ?? 0
+        soil: d.soil ?? 0,
+        temp: d.temp ?? 0,
+        hum: d.hum ?? 0,
+        light: d.light ?? 0
       }))
       .reverse();
   }, [log]);
@@ -253,6 +276,29 @@ function App() {
     </span>
   );
 
+  const callSim = async (path) => {
+    try {
+      setErrorMsg("");
+      const res = await fetch(`http://127.0.0.1:5000${path}`, { method: "POST" });
+      if (!res.ok) {
+        showToast(`데모 API가 없어요: ${path} (백엔드에 추가 필요)`, "warn");
+        return;
+      }
+      const json = await res.json().catch(() => ({}));
+      if (path.includes("start")) {
+        setDemoRunning(true);
+        showToast("🎬 데모 모드 시작! (자동 데이터 흐름)", "ok");
+      } else {
+        setDemoRunning(false);
+        showToast("🧊 데모 모드 정지!", "ok");
+      }
+      if (json?.message) showToast(json.message, "ok");
+    } catch (e) {
+      console.error(e);
+      showToast("백엔드 연결 실패: Flask 서버를 먼저 켜줘!", "warn");
+    }
+  };
+
   if (loading) {
     return <p style={{ textAlign: "center", marginTop: 100 }}>불러오는 중...</p>;
   }
@@ -261,14 +307,32 @@ function App() {
     <div className={`app-container capture ${dark ? "theme-dark" : "theme-light"}`}>
       <div className="bg-doodles" aria-hidden="true" />
 
+      <div className={`toast ${toast.show ? "toast-show" : ""} toast-${toast.type}`}>
+        {toast.text}
+      </div>
+
       <div className="topbar">
         <div className="title-wrap">
           <span className="live-dot" title="LIVE" />
           <h1 className="main-title">🌱 AI · ESG 스마트 에너지 대시보드</h1>
           <span className="tiny-tag">eco + iot + ml</span>
+
           <span className="mission-badge" title="오늘의 미션">
             {mission}
           </span>
+
+          <div className="demo-controls" title="발표 영상용 데모">
+            <button
+              className={`demo-btn ${demoRunning ? "demo-on" : ""}`}
+              type="button"
+              onClick={() => callSim("/sim/start")}
+            >
+              🎬 데모 시작
+            </button>
+            <button className="demo-btn demo-stop" type="button" onClick={() => callSim("/sim/stop")}>
+              🧊 정지
+            </button>
+          </div>
         </div>
 
         <button
@@ -282,7 +346,6 @@ function App() {
         </button>
       </div>
 
-      {/* ✅ 시스템 상태바 */}
       <div className="system-status">
         <span className={`status-pill ${systemOnline ? "status-on" : "status-off"}`}>
           {systemOnline ? "🟢 System Online" : "🔴 System Offline"}
@@ -313,7 +376,7 @@ function App() {
             value={latest ? `${formatNumber(latest.power)} kW` : "-"}
           />
           <DashboardCard
-            title={<Title emoji="🤖" text="AI 1시간 예측" />}
+            title={<Title emoji="🤖" text="1시간 예측" />}
             value={latest ? `${formatNumber(latest.pred_1h)} kW` : "-"}
           />
           <DashboardCard
@@ -324,6 +387,21 @@ function App() {
             title={<Title emoji="🌡" text="토양습도" />}
             value={latest ? `${formatNumber(latest.soil, 0)} %` : "-"}
           />
+
+          {/* ✅ 추가된 스마트팜 3개 카드 */}
+          <DashboardCard
+            title={<Title emoji="🌤" text="온도" />}
+            value={latest ? `${formatNumber(latest.temp, 1)} °C` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="💧" text="공기습도" />}
+            value={latest ? `${formatNumber(latest.hum, 1)} %` : "-"}
+          />
+          <DashboardCard
+            title={<Title emoji="💡" text="조도" />}
+            value={latest ? `${formatNumber(latest.light, 0)} %` : "-"}
+          />
+
           <DashboardCard
             title={<Title emoji="⚙" text="에너지 모드" />}
             value={latest ? <span className={latestMode.pillCls}>{latestMode.text}</span> : "-"}
@@ -367,24 +445,30 @@ function App() {
 
         <div className="chart-card">
           {modeHistory.length === 0 ? (
-            <p style={{ opacity: 0.7 }}>아직 데이터가 없습니다. 시뮬레이터(/sim/start)를 켜주세요!</p>
+            <p style={{ opacity: 0.7 }}>아직 데이터가 없습니다. 데모(/sim/start) 또는 센서(/sensor)를 켜주세요!</p>
           ) : (
             <ul className="history-list">
               {modeHistory.map((row) => {
                 const m = getModeMeta(row.mode);
+                const isNew = row.timestamp === popHistoryKey;
 
                 return (
                   <li
-                    className={`history-item ${m.rowCls} ${
-                      row.timestamp === popHistoryKey ? "history-pop" : ""
-                    }`}
+                    className={`history-item ${m.rowCls} ${isNew ? "history-pop" : ""}`}
                     key={row.timestamp}
                   >
-                    <span className="history-time">{row.timestamp}</span>
+                    <span className="history-time">
+                      {row.timestamp}
+                      {isNew && <span className="new-badge">NEW ✨</span>}
+                    </span>
+
                     <strong className="history-mode">{m.text}</strong>
+
                     <span className="history-meta">
                       SOC {formatNumber(row.soc, 0)}% · 발전 {formatNumber(row.power)}kW · 예측{" "}
-                      {formatNumber(row.pred_1h)}kW · 토양 {formatNumber(row.soil, 0)}%
+                      {formatNumber(row.pred_1h)}kW · 토양 {formatNumber(row.soil, 0)}% · 온도{" "}
+                      {formatNumber(row.temp, 1)}°C · 습도 {formatNumber(row.hum, 1)}% · 조도{" "}
+                      {formatNumber(row.light, 0)}%
                     </span>
                   </li>
                 );

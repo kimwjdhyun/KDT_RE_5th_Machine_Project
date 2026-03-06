@@ -8,141 +8,213 @@ import time
 app = Flask(__name__)
 CORS(app)
 
+# ----------------------------
+# In-memory log
+# ----------------------------
 data_log = []
 
-# --- 시뮬레이터 상태 ---
-simulator_on = False
-simulator_thread = None
+# ----------------------------
+# Demo mode worker
+# ----------------------------
+demo_running = False
+demo_thread = None
+demo_lock = threading.Lock()
 
 
-def append_log(item: dict):
-    """공통 로그 저장(최대 200개 유지)"""
-    global data_log
-    data_log.append(item)
-    data_log = data_log[-200:]
-
-
-def make_record(power: float, soc: int, soil: int):
-    record = {
-        "power": round(float(power), 2),
-        "soc": int(soc),
-        "soil": int(soil),
-        "timestamp": datetime.now().strftime("%H:%M:%S"),
-    }
-
-    # 🤖 AI 예측(더미): 현재 발전량 주변으로 살짝 흔들림
-    record["pred_1h"] = round(record["power"] * random.uniform(0.9, 1.1), 2)
-
-    # ⚡ 모드 계산
-    if record["soc"] < 20:
-        record["mode"] = 0
-    elif record["soc"] < 60:
-        record["mode"] = 1
+def calc_mode(soc: float) -> int:
+    if soc < 20:
+        return 0
+    elif soc < 60:
+        return 1
     else:
-        record["mode"] = 2
-
-    return record
+        return 2
 
 
-def simulator_loop():
-    """5초마다 자동으로 가짜 센서 데이터를 만들어 data_log에 저장"""
-    global simulator_on
-
-    # 흐름이 예쁘게 보이도록 약간 '연속성' 있는 값으로 만들기
-    power = 5.0
-    soc = 80
-    soil = 55
-
-    while simulator_on:
-        # 발전량: 약간씩 오르내리는 형태
-        power = max(0, min(15, power + random.uniform(-1.2, 1.2)))
-        # SOC: 서서히 떨어졌다가(발표용) 가끔 회복
-        soc = max(5, min(100, soc + random.randint(-3, 2)))
-        # 토양습도: 천천히 마르다가 가끔 상승(물 준 것처럼)
-        soil = max(10, min(90, soil + random.randint(-4, 2)))
-
-        # 가끔 극적인 장면(모드 전환) 만들기
-        if random.random() < 0.08:
-            soc = random.choice([15, 35, 75])  # 🔴/🟡/🟢 장면용
-
-        rec = make_record(power, soc, soil)
-        append_log(rec)
-        time.sleep(5)
+def append_row(row: dict):
+    """Keep only last 300 rows to prevent runaway memory."""
+    data_log.append(row)
+    if len(data_log) > 300:
+        del data_log[:-300]
 
 
-# --- 센서 수신 (실제 하드웨어가 붙으면 이 엔드포인트 사용) ---
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def demo_worker():
+    """
+    Every 2 seconds generate a new sensor-like record.
+    Keeps running while demo_running == True.
+    """
+    global demo_running
+
+    # 시작값: 그럴듯한 범위로 초기화
+    soc = 75.0            # %
+    power = 120.0         # kW
+    soil = 55.0           # %
+    temp = 24.0           # °C
+    hum = 55.0            # %
+    light = 65.0          # %
+
+    while True:
+        with demo_lock:
+            if not demo_running:
+                break
+
+        # ----------------------------
+        # Power / Light relationship (대충이라도 연동 느낌)
+        # ----------------------------
+        # 조도는 천천히 출렁이고
+        light += random.uniform(-4, 4)
+        light = clamp(light, 0, 100)
+
+        # 발전량은 조도 영향을 받는 것처럼
+        power += (light - 55) * 0.25 + random.uniform(-6, 6)
+        power = clamp(power, 0, 220)
+
+        # SOC: 발전량이 높으면 조금 충전, 낮으면 방전 느낌
+        soc += (power - 110) * 0.01 + random.uniform(-0.5, 0.3)
+        soc = clamp(soc, 0, 100)
+
+        # 토양습도: 서서히 감소하다가 가끔 급수 이벤트
+        soil -= random.uniform(0.3, 1.2)
+        if soil < 30 and random.random() < 0.35:
+            soil += random.uniform(15, 25)
+        soil = clamp(soil, 0, 100)
+
+        # 온도/습도: 완만한 랜덤 워크
+        temp += random.uniform(-0.25, 0.35)
+        temp = clamp(temp, 16, 34)
+
+        hum += random.uniform(-1.8, 1.2)
+        hum = clamp(hum, 20, 95)
+
+        # AI 예측 더미(현 power 기준 +- 10%)
+        pred_1h = round(power * random.uniform(0.9, 1.1), 2)
+        mode = calc_mode(soc)
+
+        row = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "power": round(power, 2),
+            "soc": round(soc, 1),
+            "soil": round(soil, 1),
+
+            # ✅ 추가된 3개 필드
+            "temp": round(temp, 1),
+            "hum": round(hum, 1),
+            "light": round(light, 0),
+
+            "pred_1h": pred_1h,
+            "mode": mode
+        }
+
+        append_row(row)
+        time.sleep(2)
+
+
+# ----------------------------
+# API
+# ----------------------------
 @app.route("/sensor", methods=["POST"])
 def sensor():
-    data = request.json or {}
-    power = data.get("power", 0)
-    soc = data.get("soc", 50)
-    soil = data.get("soil", 50)
+    """
+    Hardware/Arduino/ESP side should POST JSON here.
 
-    rec = make_record(power, soc, soil)
-    append_log(rec)
+    Example JSON:
+    {
+      "power": 123.4,
+      "soc": 76,
+      "soil": 52,
+      "temp": 25.3,
+      "hum": 58.1,
+      "light": 70
+    }
+    """
+    data = request.json or {}
+    data["timestamp"] = datetime.now().strftime("%H:%M:%S")
+
+    power = float(data.get("power", 0) or 0)
+    soc = float(data.get("soc", 50) or 50)
+    soil = float(data.get("soil", 50) or 50)
+
+    # ✅ 추가 필드도 수신 (없으면 기본값)
+    temp = float(data.get("temp", 0) or 0)
+    hum = float(data.get("hum", 0) or 0)
+    light = float(data.get("light", 0) or 0)
+
+    # 🤖 AI 예측 더미
+    data["pred_1h"] = round(power * random.uniform(0.9, 1.1), 2)
+
+    # ⚡ 에너지 모드 계산
+    data["mode"] = calc_mode(soc)
+
+    # ✅ 값 표준화(프론트 표기 안정성)
+    data["power"] = round(power, 2)
+    data["soc"] = round(soc, 1)
+    data["soil"] = round(soil, 1)
+    data["temp"] = round(temp, 1)
+    data["hum"] = round(hum, 1)
+    data["light"] = round(light, 0)
+
+    append_row(data)
 
     return jsonify({
-        "mode": rec["mode"],
-        "water_alert": 1 if rec["soil"] < 40 else 0
+        "mode": data["mode"],
+        "water_alert": 1 if soil < 40 else 0
     })
 
 
-# --- 최근 데이터 ---
-@app.route("/data")
+@app.route("/data", methods=["GET"])
 def get_data():
     return jsonify(data_log[-50:])
 
 
-# --- 최신 예측값 ---
-@app.route("/predict")
-def predict():
-    if not data_log:
-        return jsonify({"pred_1h": 0})
-    return jsonify({"pred_1h": data_log[-1]["pred_1h"]})
-
-
-# --- 통계/ESG ---
-@app.route("/stats")
+@app.route("/stats", methods=["GET"])
 def stats():
-    total_power = sum(d.get("power", 0) for d in data_log)
+    total_power = sum(float(d.get("power", 0) or 0) for d in data_log)
     return jsonify({
         "total_generation": round(total_power, 2),
         "carbon_reduction_g": round(total_power * 0.5, 2)
     })
 
 
-# --- 고정값 카드용(선택): 현재는 더미 유지 ---
-@app.route("/api/energy")
-def energy():
-    return jsonify({
-        "power": 128.5,
-        "soc": 76,
-        "carbon_saved": 32.4
-    })
-
-
-# --- 시뮬레이터 제어 ---
+# ----------------------------
+# Demo endpoints
+# ----------------------------
 @app.route("/sim/start", methods=["POST"])
 def sim_start():
-    global simulator_on, simulator_thread
-    if simulator_on:
-        return jsonify({"status": "already_running"})
-    simulator_on = True
-    simulator_thread = threading.Thread(target=simulator_loop, daemon=True)
-    simulator_thread.start()
-    return jsonify({"status": "started"})
+    global demo_running, demo_thread
+
+    with demo_lock:
+        if demo_running:
+            return jsonify({"status": "ok", "message": "데모 모드가 이미 실행 중입니다 🎬"})
+        demo_running = True
+
+    demo_thread = threading.Thread(target=demo_worker, daemon=True)
+    demo_thread.start()
+
+    return jsonify({"status": "ok", "message": "데모 모드 시작! 2초마다 데이터가 생성됩니다 🎬"})
 
 
 @app.route("/sim/stop", methods=["POST"])
 def sim_stop():
-    global simulator_on
-    simulator_on = False
-    return jsonify({"status": "stopped"})
+    global demo_running
+    with demo_lock:
+        demo_running = False
+    return jsonify({"status": "ok", "message": "데모 모드 정지! 🧊"})
 
 
 @app.route("/sim/status", methods=["GET"])
 def sim_status():
-    return jsonify({"running": simulator_on, "log_len": len(data_log)})
+    with demo_lock:
+        running = demo_running
+    return jsonify({"running": running, "log_size": len(data_log)})
+
+
+# (선택) 빠른 확인용
+@app.route("/api/hello", methods=["GET"])
+def hello():
+    return jsonify({"message": "백엔드 살아있음 ✅"})
 
 
 if __name__ == "__main__":
