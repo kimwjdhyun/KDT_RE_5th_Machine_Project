@@ -33,7 +33,7 @@
 // ─────────────────────────────────────────
 #define WIFI_SSID     "spreatics_gusan_cctv"
 #define WIFI_PASS     "spreatics*"
-#define SERVER_IP     "192.168.201.104"   // Flask 켜진 PC IP
+#define SERVER_IP     "192.168.201.106"   // Flask 켜진 PC IP
 #define SERVER_PORT   "5000"
 #define SEND_INTERVAL  5000               // 전송 주기 (5초)
 #define LCD_INTERVAL   1000               // LCD 갱신 주기 (1초)
