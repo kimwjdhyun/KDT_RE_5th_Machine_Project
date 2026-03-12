@@ -4,12 +4,15 @@ from datetime import datetime
 import os
 import json
 import random
+import csv
 
 app = Flask(__name__)
 CORS(app)
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-DATA_FILE = os.path.join(DATA_DIR, "sensor_log.json")
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
+JSON_FILE = os.path.join(DATA_DIR, "sensor_log.json")
+CSV_FILE = os.path.join(DATA_DIR, "sensor_log.csv")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -25,7 +28,8 @@ def estimate_soc_from_voltage(voltage: float) -> float:
     """
     임시 SOC 추정
     4직렬 18650 기준 예시
-    필요시 팀 상황에 맞게 조정
+    현재 충전 회로 이슈가 있더라도,
+    전압값이 들어오면 임시값으로만 사용 가능
     """
     v_min = 12.0
     v_max = 16.8
@@ -34,6 +38,12 @@ def estimate_soc_from_voltage(voltage: float) -> float:
 
 
 def calc_mode(soc: float) -> int:
+    """
+    모드 예시
+    0: 절전
+    1: 중간
+    2: 정상
+    """
     if soc < 20:
         return 0
     elif soc < 60:
@@ -54,28 +64,90 @@ def predict_power_1h(latest_power: float) -> float:
 
 
 # ----------------------------
-# 파일 저장/조회
+# JSON 저장/조회
 # ----------------------------
 def load_logs():
-    if not os.path.exists(DATA_FILE):
+    if not os.path.exists(JSON_FILE):
         return []
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return []
 
 
 def save_logs(logs):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+    with open(JSON_FILE, "w", encoding="utf-8") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
 
 
-def append_log(row: dict, max_keep: int = 300):
+def append_log_json(row: dict, max_keep: int = 300):
     logs = load_logs()
     logs.append(row)
     logs = logs[-max_keep:]
     save_logs(logs)
+    return logs
+
+
+# ----------------------------
+# CSV 저장
+# ----------------------------
+def ensure_csv_exists():
+    """
+    CSV 파일이 없으면 헤더를 생성한다.
+    XGBoost 학습용으로 바로 활용할 수 있게 컬럼을 명확히 맞춘다.
+    """
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp",
+                "temp",
+                "hum",
+                "soil",
+                "light",
+                "voltage",
+                "current",
+                "power",
+                "soc",
+                "pump",
+                "led",
+                "pred_1h",
+                "mode",
+                "water_alert"
+            ])
+
+
+def append_log_csv(row: dict):
+    ensure_csv_exists()
+    with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            row["timestamp"],
+            row["temp"],
+            row["hum"],
+            row["soil"],
+            row["light"],
+            row["voltage"],
+            row["current"],
+            row["power"],
+            row["soc"],
+            row["pump"],
+            row["led"],
+            row["pred_1h"],
+            row["mode"],
+            row["water_alert"]
+        ])
+
+
+def append_log(row: dict, max_keep: int = 300):
+    """
+    JSON + CSV 둘 다 저장
+    - JSON: 대시보드 API용
+    - CSV : XGBoost 학습용
+    """
+    logs = append_log_json(row, max_keep=max_keep)
+    append_log_csv(row)
     return logs
 
 
@@ -91,6 +163,21 @@ def hello():
 
 @app.route("/sensor", methods=["POST"])
 def sensor():
+    """
+    Arduino / ESP-01이 보내는 센서 데이터를 수신
+    현재 권장 payload 예시:
+    {
+      "temp": 24.5,
+      "hum": 55.1,
+      "soil": 38,
+      "light": 812,
+      "voltage": 12.4,
+      "current": 0.35,
+      "power": 4.34,   # 없어도 됨
+      "pump": 0,
+      "led": 1
+    }
+    """
     data = request.get_json(silent=True) or {}
 
     temp = float(data.get("temp", 0) or 0)
@@ -100,11 +187,19 @@ def sensor():
 
     voltage = float(data.get("voltage", 0) or 0)
     current = float(data.get("current", 0) or 0)
-    power = float(data.get("power", 0) or 0)
+
+    # power가 안 오면 서버에서 자동 계산
+    incoming_power = data.get("power", None)
+    if incoming_power is None or incoming_power == "":
+        power = voltage * current
+    else:
+        power = float(incoming_power)
 
     pump = int(data.get("pump", 0) or 0)
     led = int(data.get("led", 0) or 0)
 
+    # SOC는 들어오면 사용, 없으면 전압 기반 임시 추정
+    # 현재 SOC를 빼고 가고 싶으면 이 부분은 그대로 둬도 문제 없음
     incoming_soc = data.get("soc", None)
     soc = float(incoming_soc) if incoming_soc is not None else estimate_soc_from_voltage(voltage)
 
@@ -119,7 +214,7 @@ def sensor():
         "soil": round(soil, 1),
         "light": round(light, 0),
         "voltage": round(voltage, 2),
-        "current": round(current, 1),
+        "current": round(current, 3),
         "power": round(power, 2),
         "soc": round(soc, 1),
         "pump": pump,
@@ -133,9 +228,11 @@ def sensor():
 
     return jsonify({
         "status": "ok",
+        "message": "sensor data saved",
         "mode": mode,
         "water_alert": water_alert,
-        "pred_1h": pred_1h
+        "pred_1h": pred_1h,
+        "saved_row": row
     })
 
 
@@ -177,5 +274,18 @@ def stats():
     })
 
 
+@app.route("/csv-status", methods=["GET"])
+def csv_status():
+    """
+    CSV 생성 여부와 저장 경로 확인용
+    """
+    return jsonify({
+        "csv_exists": os.path.exists(CSV_FILE),
+        "csv_file": CSV_FILE,
+        "json_file": JSON_FILE
+    })
+
+
 if __name__ == "__main__":
+    ensure_csv_exists()
     app.run(host="0.0.0.0", port=5000, debug=True)
