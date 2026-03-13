@@ -24,22 +24,33 @@ def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
-def estimate_soc_from_voltage(voltage: float) -> float:
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def estimate_soc_from_battery_voltage(battery_voltage: float) -> float:
     """
-    임시 SOC 추정
-    4직렬 18650 기준 예시
-    현재 충전 회로 이슈가 있더라도,
-    전압값이 들어오면 임시값으로만 사용 가능
+    4직렬 18650 배터리 기준 임시 SOC 추정
+    12.0V ~ 16.8V 범위를 0~100%로 단순 매핑
     """
     v_min = 12.0
     v_max = 16.8
-    soc = ((voltage - v_min) / (v_max - v_min)) * 100.0
+    soc = ((battery_voltage - v_min) / (v_max - v_min)) * 100.0
     return round(clamp(soc, 0, 100), 1)
 
 
 def calc_mode(soc: float) -> int:
     """
-    모드 예시
     0: 절전
     1: 중간
     2: 정상
@@ -55,12 +66,12 @@ def calc_water_alert(soil: float) -> int:
     return 1 if soil < 40 else 0
 
 
-def predict_power_1h(latest_power: float) -> float:
+def predict_power_1h(latest_solar_power: float) -> float:
     """
     임시 더미 예측
-    나중에 AI 담당이 GRU/XGBoost 결과로 교체
+    나중에 XGBoost / GRU 예측값으로 교체
     """
-    return round(latest_power * random.uniform(0.9, 1.1), 2)
+    return round(latest_solar_power * random.uniform(0.9, 1.1), 2)
 
 
 # ----------------------------
@@ -93,25 +104,24 @@ def append_log_json(row: dict, max_keep: int = 300):
 # CSV 저장
 # ----------------------------
 def ensure_csv_exists():
-    """
-    CSV 파일이 없으면 헤더를 생성한다.
-    XGBoost 학습용으로 바로 활용할 수 있게 컬럼을 명확히 맞춘다.
-    """
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp",
-                "temp",
-                "hum",
+                "temperature",
+                "humidity",
                 "soil",
                 "light",
-                "voltage",
-                "current",
-                "power",
-                "soc",
+                "solar_voltage",
+                "solar_current",
+                "solar_power",
+                "battery_voltage",
+                "battery_current",
+                "battery_power",
                 "pump",
                 "led",
+                "soc",
                 "pred_1h",
                 "mode",
                 "water_alert"
@@ -124,16 +134,19 @@ def append_log_csv(row: dict):
         writer = csv.writer(f)
         writer.writerow([
             row["timestamp"],
-            row["temp"],
-            row["hum"],
+            row["temperature"],
+            row["humidity"],
             row["soil"],
             row["light"],
-            row["voltage"],
-            row["current"],
-            row["power"],
-            row["soc"],
+            row["solar_voltage"],
+            row["solar_current"],
+            row["solar_power"],
+            row["battery_voltage"],
+            row["battery_current"],
+            row["battery_power"],
             row["pump"],
             row["led"],
+            row["soc"],
             row["pred_1h"],
             row["mode"],
             row["water_alert"]
@@ -141,11 +154,6 @@ def append_log_csv(row: dict):
 
 
 def append_log(row: dict, max_keep: int = 300):
-    """
-    JSON + CSV 둘 다 저장
-    - JSON: 대시보드 API용
-    - CSV : XGBoost 학습용
-    """
     logs = append_log_json(row, max_keep=max_keep)
     append_log_csv(row)
     return logs
@@ -164,61 +172,82 @@ def hello():
 @app.route("/sensor", methods=["POST"])
 def sensor():
     """
-    Arduino / ESP-01이 보내는 센서 데이터를 수신
-    현재 권장 payload 예시:
+    권장 payload 예시:
     {
-      "temp": 24.5,
-      "hum": 55.1,
+      "temperature": 24.5,
+      "humidity": 55.1,
       "soil": 38,
       "light": 812,
-      "voltage": 12.4,
-      "current": 0.35,
-      "power": 4.34,   # 없어도 됨
+      "solar_voltage": 18.4,
+      "solar_current": 0.42,
+      "solar_power": 7.73,
+      "battery_voltage": 14.8,
+      "battery_current": 0.35,
+      "battery_power": 5.18,
       "pump": 0,
       "led": 1
     }
+
+    호환용으로 아래 예전 키도 임시 허용:
+    temp -> temperature
+    hum -> humidity
+    voltage/current/power -> solar_voltage/solar_current/solar_power
     """
+
     data = request.get_json(silent=True) or {}
 
-    temp = float(data.get("temp", 0) or 0)
-    hum = float(data.get("hum", 0) or 0)
-    soil = float(data.get("soil", 0) or 0)
-    light = float(data.get("light", 0) or 0)
+    # 새 키 우선, 예전 키는 호환용 fallback
+    temperature = safe_float(data.get("temperature", data.get("temp", 0)), 0)
+    humidity = safe_float(data.get("humidity", data.get("hum", 0)), 0)
+    soil = safe_float(data.get("soil", 0), 0)
+    light = safe_float(data.get("light", 0), 0)
 
-    voltage = float(data.get("voltage", 0) or 0)
-    current = float(data.get("current", 0) or 0)
+    solar_voltage = safe_float(data.get("solar_voltage", data.get("voltage", 0)), 0)
+    solar_current = safe_float(data.get("solar_current", data.get("current", 0)), 0)
 
-    # power가 안 오면 서버에서 자동 계산
-    incoming_power = data.get("power", None)
-    if incoming_power is None or incoming_power == "":
-        power = voltage * current
+    incoming_solar_power = data.get("solar_power", data.get("power", None))
+    if incoming_solar_power is None or incoming_solar_power == "":
+        solar_power = solar_voltage * solar_current
     else:
-        power = float(incoming_power)
+        solar_power = safe_float(incoming_solar_power, 0)
 
-    pump = int(data.get("pump", 0) or 0)
-    led = int(data.get("led", 0) or 0)
+    battery_voltage = safe_float(data.get("battery_voltage", 0), 0)
+    battery_current = safe_float(data.get("battery_current", 0), 0)
 
-    # SOC는 들어오면 사용, 없으면 전압 기반 임시 추정
-    # 현재 SOC를 빼고 가고 싶으면 이 부분은 그대로 둬도 문제 없음
+    incoming_battery_power = data.get("battery_power", None)
+    if incoming_battery_power is None or incoming_battery_power == "":
+        battery_power = battery_voltage * battery_current
+    else:
+        battery_power = safe_float(incoming_battery_power, 0)
+
+    pump = safe_int(data.get("pump", 0), 0)
+    led = safe_int(data.get("led", 0), 0)
+
     incoming_soc = data.get("soc", None)
-    soc = float(incoming_soc) if incoming_soc is not None else estimate_soc_from_voltage(voltage)
+    if incoming_soc is None or incoming_soc == "":
+        soc = estimate_soc_from_battery_voltage(battery_voltage)
+    else:
+        soc = round(clamp(safe_float(incoming_soc, 0), 0, 100), 1)
 
-    pred_1h = predict_power_1h(power)
+    pred_1h = predict_power_1h(solar_power)
     mode = calc_mode(soc)
     water_alert = calc_water_alert(soil)
 
     row = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "temp": round(temp, 1),
-        "hum": round(hum, 1),
+        "temperature": round(temperature, 1),
+        "humidity": round(humidity, 1),
         "soil": round(soil, 1),
         "light": round(light, 0),
-        "voltage": round(voltage, 2),
-        "current": round(current, 3),
-        "power": round(power, 2),
-        "soc": round(soc, 1),
+        "solar_voltage": round(solar_voltage, 2),
+        "solar_current": round(solar_current, 3),
+        "solar_power": round(solar_power, 2),
+        "battery_voltage": round(battery_voltage, 2),
+        "battery_current": round(battery_current, 3),
+        "battery_power": round(battery_power, 2),
         "pump": pump,
         "led": led,
+        "soc": round(soc, 1),
         "pred_1h": pred_1h,
         "mode": mode,
         "water_alert": water_alert
@@ -253,32 +282,34 @@ def get_latest():
 @app.route("/stats", methods=["GET"])
 def stats():
     logs = load_logs()
-
-    total_power = sum(float(d.get("power", 0) or 0) for d in logs)
     total_count = len(logs)
 
-    avg_temp = round(
-        sum(float(d.get("temp", 0) or 0) for d in logs) / total_count, 1
+    total_solar_generation = sum(float(d.get("solar_power", 0) or 0) for d in logs)
+
+    avg_temperature = round(
+        sum(float(d.get("temperature", 0) or 0) for d in logs) / total_count, 1
     ) if total_count else 0
 
-    avg_hum = round(
-        sum(float(d.get("hum", 0) or 0) for d in logs) / total_count, 1
+    avg_humidity = round(
+        sum(float(d.get("humidity", 0) or 0) for d in logs) / total_count, 1
+    ) if total_count else 0
+
+    avg_battery_voltage = round(
+        sum(float(d.get("battery_voltage", 0) or 0) for d in logs) / total_count, 2
     ) if total_count else 0
 
     return jsonify({
         "count": total_count,
-        "total_generation": round(total_power, 2),
-        "carbon_reduction_g": round(total_power * 0.5, 2),
-        "avg_temp": avg_temp,
-        "avg_hum": avg_hum
+        "total_solar_generation": round(total_solar_generation, 2),
+        "carbon_reduction_g": round(total_solar_generation * 0.5, 2),
+        "avg_temperature": avg_temperature,
+        "avg_humidity": avg_humidity,
+        "avg_battery_voltage": avg_battery_voltage
     })
 
 
 @app.route("/csv-status", methods=["GET"])
 def csv_status():
-    """
-    CSV 생성 여부와 저장 경로 확인용
-    """
     return jsonify({
         "csv_exists": os.path.exists(CSV_FILE),
         "csv_file": CSV_FILE,
@@ -288,4 +319,4 @@ def csv_status():
 
 if __name__ == "__main__":
     ensure_csv_exists()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)
