@@ -1,31 +1,3 @@
-# ================================================
-# app_gru.py
-# 스마트팜 Flask 서버 (AI 추론 + 데이터 수신)
-#
-# [이 파일의 역할]
-#   아두이노 A보드에서 센서 데이터를 받아서
-#   AI 모델로 분석 후 명령(에너지모드, 급수여부)을 돌려줌
-#
-# [전체 흐름]
-#   아두이노 A보드
-#     → POST /sensor (JSON 전송)
-#       → Flask가 받음
-#         → GRU로 발전량 예측
-#         → 급수 모델로 급수 여부 판단
-#         → 에너지 모드 결정
-#       → {mode, water_alert, pred_power} 응답
-#     → 아두이노가 응답 파싱해서 B보드에 명령
-#
-# [모델이 없을 때]
-#   train_gru.py, train_water.py를 아직 실행 안 했어도
-#   규칙 기반(단순 조건문)으로 동작함 → 서버 항상 켜놔도 됨
-#
-# [실행 방법]
-#   cd backend
-#   python app_gru.py
-#   → http://192.168.x.x:5000 으로 접속 가능
-# ================================================
-
 import os           # 파일/폴더 존재 확인, 경로 처리
 import csv          # CSV 파일 읽기/쓰기 (farm_data.csv)
 import numpy as np  # 배열 연산 (GRU 입력 데이터 가공)
@@ -72,6 +44,29 @@ SOIL_THRESHOLD  = 40.0   # 규칙 기반 토양습도 임계값 (%)
 
 
 # ================================================
+# 키 이름 호환 헬퍼 함수
+#
+# [왜 필요한가?]
+#   아두이노 코드가 "temperature", "solar_power", "solar_voltage" 등
+#   긴 키 이름으로 전송함
+#   기존 서버 코드는 "temp", "power", "voltage" 등 짧은 키로 받음
+#   → 두 키 이름을 모두 허용해서 어떤 아두이노 코드와도 호환되게 함
+#
+# [우선순위]
+#   새 키(solar_power 등) 먼저 확인 → 없으면 예전 키(power 등) 확인
+# ================================================
+def get_val(data, *keys, default=0.0):
+    # keys 순서대로 찾아서 처음 발견된 값 반환
+    for k in keys:
+        if k in data and data[k] != "" and data[k] is not None:
+            try:
+                return float(data[k])
+            except (TypeError, ValueError):
+                continue
+    return default
+
+
+# ================================================
 # GRU 발전량 예측 모델 클래스
 #
 # ★ 반드시 train_gru.py의 PowerPredictionGRU와 완전히 동일해야 함!
@@ -105,7 +100,7 @@ class PowerPredictionGRU(nn.Module):
 
     def forward(self, x):
         # x의 형태: (배치크기, 시퀀스길이, 특성수) = (1, 30, 7)
-        out, _ = self.gru(x)         # out: (1, 30, 32) - 모든 시점의 hidden state
+        out, _ = self.gru(x)          # out: (1, 30, 32) - 모든 시점의 hidden state
         return self.fc(out[:, -1, :]) # 마지막 시점(-1)만 FC에 통과 → (1, 1)
 
 
@@ -178,8 +173,8 @@ if os.path.exists("models/gru.pth") and os.path.exists("models/scaler_gru.pkl"):
     try:
         # load_state_dict: 저장된 가중치(숫자들)를 빈 모델에 채워 넣음
         gru_model.load_state_dict(torch.load("models/gru.pth", map_location="cpu"))
-        gru_model.eval()                                  # 추론 모드로 전환
-        scaler_gru = joblib.load("models/scaler_gru.pkl") # 스케일러 복원
+        gru_model.eval()                                   # 추론 모드로 전환
+        scaler_gru = joblib.load("models/scaler_gru.pkl")  # 스케일러 복원
         gru_ready  = True
         print("✅ GRU 모델 로드 완료")
     except Exception as e:
@@ -235,17 +230,16 @@ def save_csv(data: dict, mode: int):
 
         writer.writerow({
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            # data.get("key", 기본값): 해당 키가 없을 경우 기본값 사용
-            # float() 변환: 아두이노에서 문자열로 올 수도 있으므로 실수 변환
+            # get_val(): 새 키(temperature 등) 먼저 확인, 없으면 예전 키(temp 등) 확인
             # round(값, 소수점자리): 저장 정밀도 설정
-            "temp":    round(float(data.get("temp",    0)), 1),
-            "hum":     round(float(data.get("hum",     0)), 1),
-            "power":   round(float(data.get("power",   0)), 3),
-            "voltage": round(float(data.get("voltage", 0)), 3),
-            "current": round(float(data.get("current", 0)), 3),
-            "light":   round(float(data.get("light",   0)), 1),
-            "soil":    round(float(data.get("soil",    0)), 1),
-            "soc":     int(data.get("soc", 100)),    # SOC 추가: 없으면 기본값 100
+            "temp":    round(get_val(data, "temperature",   "temp"),    1),
+            "hum":     round(get_val(data, "humidity",      "hum"),     1),
+            "power":   round(get_val(data, "solar_power",   "power"),   3),
+            "voltage": round(get_val(data, "solar_voltage", "voltage"), 3),
+            "current": round(get_val(data, "solar_current", "current"), 3),
+            "light":   round(get_val(data, "light"),                    1),
+            "soil":    round(get_val(data, "soil"),                     1),
+            "soc":     int(get_val(data, "soc", default=100)),
             "mode":    mode,
         })
 
@@ -312,18 +306,19 @@ def predict_power(data: dict):
         hour = datetime.now().hour  # 현재 시간 (0~23)
 
         # 버퍼의 30개 데이터를 7개 특성 순서대로 리스트로 변환
-        # 순서: [power, voltage, light, temp, hour_sin, hour_co, soc]
+        # 순서: [power, voltage, light, temp, hour_sin, hour_cos, soc]
         # ★ 이 순서가 train_gru.py의 FEATURES 순서와 완전히 같아야 함!
+        # get_val(): 새 키(solar_power 등) 먼저 확인, 없으면 예전 키(power 등) 확인
         seq = []
         for row in recent_buffer:
             seq.append([
-                float(row.get("power",   0)),
-                float(row.get("voltage", 0)),
-                float(row.get("light",   0)),
-                float(row.get("temp",    0)),
+                get_val(row, "solar_power",   "power"),
+                get_val(row, "solar_voltage", "voltage"),
+                get_val(row, "light"),
+                get_val(row, "temperature",   "temp"),
                 np.sin(2 * np.pi * hour / 24),   # hour_sin: 시간 순환성 표현
                 np.cos(2 * np.pi * hour / 24),   # hour_cos: sin만으론 3시/9시 구분 불가
-                float(row.get("soc", 100)),      # SOC 추가: 배터리 잔량
+                get_val(row, "soc", default=100),
             ])
 
         seq_np     = np.array(seq, dtype=np.float32)   # 리스트 → numpy (30, 7)
@@ -402,7 +397,12 @@ def predict_water(soil: float, temp: float, hum: float) -> bool:
 #   해당 URL 경로와 HTTP 메서드를 이 함수에 연결
 #   methods=["POST"] : POST 요청만 받음 (GET은 무시)
 #
-# [아두이노가 보내는 JSON 예시]
+# [아두이노가 보내는 JSON 예시 - 새 키]
+#   {"temperature":24.5, "humidity":58.0, "soil":47, "light":51,
+#    "solar_voltage":12.34, "solar_current":0.32, "solar_power":2.5,
+#    "battery_voltage":14.8, "soc":80, "pump":0, "led":1}
+#
+# [아두이노가 보내는 JSON 예시 - 예전 키 (호환)]
 #   {"temp":24.5, "hum":58.0, "soil":47, "light":51,
 #    "voltage":12.34, "current":320.5, "power":2504.0,
 #    "soc":80, "pump":0, "led":1}
@@ -421,25 +421,26 @@ def sensor():
     # 새 데이터를 버퍼에 추가 (오래된 것은 자동 제거)
     recent_buffer.append(data)
 
-    # 데이터에서 각 값 추출 (없으면 기본값 사용)
-    power = float(data.get("power", 0))
-    soc   = int(data.get("soc", 100))   # SOC 추가: 없으면 기본값 100 (완충 가정)
+    # 데이터에서 각 값 추출
+    # get_val(): 새 키(solar_power 등) 먼저 확인, 없으면 예전 키(power 등) 확인
+    power = get_val(data, "solar_power", "power")
+    soc   = int(get_val(data, "soc", default=100))  # 없으면 기본값 100 (완충 가정)
 
     # AI 추론 실행
     pred_power  = predict_power(data)  # GRU: 앞으로 발전량 예측 (없으면 None)
     water_alert = predict_water(       # 급수 AI: 물 줘야 하나?
-        float(data.get("soil", 50)),
-        float(data.get("temp", 25)),
-        float(data.get("hum",  50))
+        get_val(data, "soil",        default=50),
+        get_val(data, "temperature", "temp", default=25),
+        get_val(data, "humidity",    "hum",  default=50),
     )
-    mode = decide_mode(soc, pred_power)  # SOC 기반 에너지 모드 결정 (0/1/2)
+    mode = decide_mode(power, pred_power, soc)  # SOC 기반 에너지 모드 결정 (0/1/2)
 
     # CSV에 저장 (나중에 AI 재학습 시 사용)
     save_csv(data, mode)
 
     # 콘솔에 수신 로그 출력 (디버깅 확인용)
     print(f"[수신] 토양:{data.get('soil')}% 조도:{data.get('light')}% "
-          f"온도:{data.get('temp')}° 발전:{power}W "
+          f"온도:{data.get('temperature', data.get('temp'))}° 발전:{power}W "
           f"→ mode:{mode} water:{water_alert} "
           f"pred:{f'{pred_power:.2f}W' if pred_power is not None else 'GRU대기중'}")
 
@@ -533,6 +534,29 @@ def status():
         "csv_rows":    sum(1 for _ in open(CSV_FILE)) - 1
                        if os.path.exists(CSV_FILE) else 0,
     })
+
+
+# ================================================
+# Flask 라우트: /latest (GET)
+#
+# [역할]
+#   가장 최근 데이터 1개를 JSON으로 반환
+#   웹 대시보드에서 현재 상태 실시간 표시할 때 사용
+# ================================================
+@app.route("/latest", methods=["GET"])
+def latest():
+    if not os.path.exists(CSV_FILE):
+        return jsonify({}), 404
+
+    rows = []
+    with open(CSV_FILE, "r") as f:
+        for row in csv.DictReader(f):
+            rows.append(row)
+
+    if not rows:
+        return jsonify({}), 404
+
+    return jsonify(rows[-1])
 
 
 # ================================================
