@@ -1,13 +1,27 @@
-import axios from "axios";
+const API_BASE = "http://127.0.0.1:5000";
 
-const API_BASE_URL = "http://127.0.0.1:5000";
+async function fetchJSON(url) {
+  const res = await fetch(url);
 
-export const fetchDataLog = async () => {
-  const res = await axios.get(`${API_BASE_URL}/data`);
-  return res.data; // 최근 50개 배열
-};
+  if (!res.ok) {
+    throw new Error(`API 요청 실패: ${res.status}`);
+  }
 
-export const fetchStats = async () => {
-  const res = await axios.get(`${API_BASE_URL}/stats`);
-  return res.data; // { total_generation, carbon_reduction_g }
-};
+  return res.json();
+}
+
+export async function fetchDataLog() {
+  return fetchJSON(`${API_BASE}/api/history`);
+}
+
+export async function fetchStats() {
+  return fetchJSON(`${API_BASE}/api/stats`);
+}
+
+export async function fetchLatest() {
+  return fetchJSON(`${API_BASE}/api/latest`);
+}
+
+export async function fetchHealth() {
+  return fetchJSON(`${API_BASE}/api/health`);
+}

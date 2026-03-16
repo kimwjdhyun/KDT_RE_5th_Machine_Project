@@ -1,10 +1,14 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
 from datetime import datetime
+from collections import deque
 import os
 import json
 import random
 import csv
+import time
+import threading
+import serial
 
 app = Flask(__name__)
 CORS(app)
@@ -16,6 +20,16 @@ CSV_FILE = os.path.join(DATA_DIR, "sensor_log.csv")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# ----------------------------
+# 시리얼 설정
+# Windows: COM3, COM4 ...
+# Mac/Linux: /dev/ttyUSB0, /dev/ttyACM0 ...
+# ----------------------------
+SERIAL_PORT = "COM4"
+BAUD_RATE = 9600
+
+latest_row = None
+history_memory = deque(maxlen=300)
 
 # ----------------------------
 # 유틸
@@ -39,10 +53,6 @@ def safe_int(value, default=0):
 
 
 def estimate_soc_from_battery_voltage(battery_voltage: float) -> float:
-    """
-    4직렬 18650 배터리 기준 임시 SOC 추정
-    12.0V ~ 16.8V 범위를 0~100%로 단순 매핑
-    """
     v_min = 12.0
     v_max = 16.8
     soc = ((battery_voltage - v_min) / (v_max - v_min)) * 100.0
@@ -50,11 +60,6 @@ def estimate_soc_from_battery_voltage(battery_voltage: float) -> float:
 
 
 def calc_mode(soc: float) -> int:
-    """
-    0: 절전
-    1: 중간
-    2: 정상
-    """
     if soc < 20:
         return 0
     elif soc < 60:
@@ -67,10 +72,6 @@ def calc_water_alert(soil: float) -> int:
 
 
 def predict_power_1h(latest_solar_power: float) -> float:
-    """
-    임시 더미 예측
-    나중에 XGBoost / GRU 예측값으로 교체
-    """
     return round(latest_solar_power * random.uniform(0.9, 1.1), 2)
 
 
@@ -156,56 +157,23 @@ def append_log_csv(row: dict):
 def append_log(row: dict, max_keep: int = 300):
     logs = append_log_json(row, max_keep=max_keep)
     append_log_csv(row)
+    history_memory.append(row)
     return logs
 
 
 # ----------------------------
-# API
+# 시리얼 데이터 처리
 # ----------------------------
-@app.route("/api/hello", methods=["GET"])
-def hello():
-    return jsonify({
-        "message": "공용 Flask 서버 정상 실행 중 ✅"
-    })
-
-
-@app.route("/sensor", methods=["POST"])
-def sensor():
-    """
-    권장 payload 예시:
-    {
-      "temperature": 24.5,
-      "humidity": 55.1,
-      "soil": 38,
-      "light": 812,
-      "solar_voltage": 18.4,
-      "solar_current": 0.42,
-      "solar_power": 7.73,
-      "battery_voltage": 14.8,
-      "battery_current": 0.35,
-      "battery_power": 5.18,
-      "pump": 0,
-      "led": 1
-    }
-
-    호환용으로 아래 예전 키도 임시 허용:
-    temp -> temperature
-    hum -> humidity
-    voltage/current/power -> solar_voltage/solar_current/solar_power
-    """
-
-    data = request.get_json(silent=True) or {}
-
-    # 새 키 우선, 예전 키는 호환용 fallback
-    temperature = safe_float(data.get("temperature", data.get("temp", 0)), 0)
-    humidity = safe_float(data.get("humidity", data.get("hum", 0)), 0)
+def build_row_from_serial(data: dict) -> dict:
+    temperature = safe_float(data.get("temperature", 0), 0)
+    humidity = safe_float(data.get("humidity", 0), 0)
     soil = safe_float(data.get("soil", 0), 0)
     light = safe_float(data.get("light", 0), 0)
 
-    solar_voltage = safe_float(data.get("solar_voltage", data.get("voltage", 0)), 0)
-    solar_current = safe_float(data.get("solar_current", data.get("current", 0)), 0)
+    solar_voltage = safe_float(data.get("solar_voltage", 0), 0)
+    solar_current = safe_float(data.get("solar_current", 0), 0)
 
-    incoming_solar_power = data.get("solar_power", data.get("power", None))
+    incoming_solar_power = data.get("solar_power", None)
     if incoming_solar_power is None or incoming_solar_power == "":
         solar_power = solar_voltage * solar_current
     else:
@@ -229,9 +197,19 @@ def sensor():
     else:
         soc = round(clamp(safe_float(incoming_soc, 0), 0, 100), 1)
 
+    incoming_mode = data.get("mode", None)
+    if incoming_mode is None or incoming_mode == "":
+        mode = calc_mode(soc)
+    else:
+        mode = safe_int(incoming_mode, calc_mode(soc))
+
+    incoming_water_alert = data.get("water_alert", None)
+    if incoming_water_alert is None or incoming_water_alert == "":
+        water_alert = calc_water_alert(soil)
+    else:
+        water_alert = safe_int(incoming_water_alert, calc_water_alert(soil))
+
     pred_1h = predict_power_1h(solar_power)
-    mode = calc_mode(soc)
-    water_alert = calc_water_alert(soil)
 
     row = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -252,36 +230,97 @@ def sensor():
         "mode": mode,
         "water_alert": water_alert
     }
+    return row
 
-    append_log(row)
 
+def serial_reader():
+    global latest_row
+
+    while True:
+        try:
+            print(f"[SERIAL] 연결 시도: {SERIAL_PORT}")
+            with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
+                time.sleep(3)
+                print("[SERIAL] 연결 성공")
+
+                while True:
+                    raw = ser.readline().decode("utf-8", errors="ignore").strip()
+
+                    if not raw:
+                        continue
+
+                    print("[RAW]", raw)
+
+                    if raw.startswith("[DEBUG]") or raw.startswith("[MASTER]") or raw.startswith("[INA219]"):
+                        continue
+
+                    if raw.startswith("{") and raw.endswith("}"):
+                        try:
+                            data = json.loads(raw)
+                            row = build_row_from_serial(data)
+                            latest_row = row
+                            append_log(row)
+                            print("[DATA 저장 완료]", row)
+                        except json.JSONDecodeError:
+                            print("[JSON 파싱 실패]", raw)
+                    else:
+                        print("[무시됨]", raw)
+
+        except serial.SerialException as e:
+            print("[SERIAL 오류]", e)
+            time.sleep(3)
+        except Exception as e:
+            print("[예상치 못한 오류]", e)
+            time.sleep(3)
+
+
+# ----------------------------
+# API
+# ----------------------------
+@app.route("/api/hello", methods=["GET"])
+def hello():
     return jsonify({
-        "status": "ok",
-        "message": "sensor data saved",
-        "mode": mode,
-        "water_alert": water_alert,
-        "pred_1h": pred_1h,
-        "saved_row": row
+        "message": "Flask 서버 정상 실행 중 ✅",
+        "serial_port": SERIAL_PORT
     })
 
 
-@app.route("/data", methods=["GET"])
-def get_data():
-    logs = load_logs()
-    return jsonify(logs[-50:])
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "latest_exists": latest_row is not None,
+        "history_count": len(history_memory),
+        "serial_port": SERIAL_PORT
+    })
 
 
 @app.route("/latest", methods=["GET"])
+@app.route("/api/latest", methods=["GET"])
 def get_latest():
+    if latest_row is not None:
+        return jsonify(latest_row)
+
     logs = load_logs()
     if not logs:
         return jsonify({})
     return jsonify(logs[-1])
 
 
-@app.route("/stats", methods=["GET"])
-def stats():
+@app.route("/data", methods=["GET"])
+@app.route("/api/history", methods=["GET"])
+def get_data():
+    if len(history_memory) > 0:
+        return jsonify(list(history_memory)[-50:])
+
     logs = load_logs()
+    return jsonify(logs[-50:])
+
+
+@app.route("/stats", methods=["GET"])
+@app.route("/api/stats", methods=["GET"])
+def stats():
+    logs = list(history_memory) if len(history_memory) > 0 else load_logs()
     total_count = len(logs)
 
     total_solar_generation = sum(float(d.get("solar_power", 0) or 0) for d in logs)
@@ -319,4 +358,15 @@ def csv_status():
 
 if __name__ == "__main__":
     ensure_csv_exists()
+
+    loaded_logs = load_logs()[-300:]
+    for row in loaded_logs:
+        history_memory.append(row)
+
+    if loaded_logs:
+        latest_row = loaded_logs[-1]
+
+    t = threading.Thread(target=serial_reader, daemon=True)
+    t.start()
+
     app.run(host="0.0.0.0", port=5000, debug=False)
