@@ -6,7 +6,7 @@ import requests
 import json
 import time
 
-SERIAL_PORT = "COM4"
+SERIAL_PORT = "COM3"
 BAUD_RATE   = 9600
 SERVER_URL  = "http://localhost:5000/sensor"
 
