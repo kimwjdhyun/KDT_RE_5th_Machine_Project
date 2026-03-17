@@ -25,7 +25,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Windows: COM3, COM4 ...
 # Mac/Linux: /dev/ttyUSB0, /dev/ttyACM0 ...
 # ----------------------------
-SERIAL_PORT = "COM4"
+SERIAL_PORT = "COM3"
 BAUD_RATE = 9600
 
 latest_row = None
