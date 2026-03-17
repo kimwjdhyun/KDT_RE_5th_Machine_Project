@@ -1,16 +1,16 @@
 #include <Wire.h>
 #include <DHT.h>
-#include <Adafruit_INA219.h>
+#include <Adafruit_INA3221.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 
 #define DHT_PIN           5
-#define DHT_TYPE          DHT22   // DHT11이면 DHT11로 변경
+#define DHT_TYPE          DHT22
 
 #define NEOPIXEL_PIN      6
 #define NUM_PIXELS        60
 
-#define PUMP_PIN          8       // MOSFET Gate
+#define PUMP_PIN          8
 
 #define LDR_PIN           A1
 #define SOIL_PIN          A2
@@ -18,18 +18,21 @@
 #define SEND_INTERVAL     10000UL
 
 #define BAT_MAX_V         16.8
-#define BAT_MIN_V         12.0
+#define BAT_MIN_V         10.8
+
+// INA3221 채널 번호
+#define INA_CH_SOLAR      0
+#define INA_CH_BATTERY    1
+#define INA_CH_SPARE      2
 
 DHT dht(DHT_PIN, DHT_TYPE);
-Adafruit_INA219 ina219_solar(0x40);
-Adafruit_INA219 ina219_battery(0x41);
+Adafruit_INA3221 ina3221;
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 unsigned long lastSendTime = 0;
 unsigned long lastPrintTime = 0;
 
-bool solarINAOK = false;
-bool batteryINAOK = false;
+bool ina3221OK = false;
 
 // ----------------------------
 // 유틸
@@ -66,26 +69,32 @@ bool calcWaterAlert(int soil) {
   return soil < 40;
 }
 
-// 조도가 높을수록 네오픽셀은 어둡게
+// 스마트팜용 LED 로직
+// 밝으면 꺼지고, 어두우면 켜짐
 int calcLedBrightness(int light, uint8_t mode) {
-  if (mode == 0) return 0;
-
-  // light 0~100 -> brightness 255~30
-  int brightness = map(light, 0, 100, 255, 30);
-
-  if (mode == 1) {
-    brightness = brightness / 2;   // 절약모드면 절반
+  // 배터리 매우 부족하면 최소 밝기만 유지
+  if (mode == 0) {
+    if (light <= 70) return 30;
+    return 0;
   }
 
-  brightness = constrain(brightness, 0, 255);
-  return brightness;
+  // 밝으면 LED OFF
+  if (light > 70) return 0;
+
+  // 어두울수록 밝게
+  int brightness = map(light, 0, 70, 255, 50);
+
+  if (mode == 1) {
+    brightness /= 2;
+  }
+
+  return constrain(brightness, 0, 255);
 }
 
 void updateNeoPixelPurple(int brightness) {
   strip.setBrightness(brightness);
 
   for (int i = 0; i < NUM_PIXELS; i++) {
-    // 보라색
     strip.setPixelColor(i, strip.Color(180, 0, 255));
   }
 
@@ -109,18 +118,14 @@ void setup() {
 
   Serial.println(F("[MASTER] 시작"));
 
-  solarINAOK = ina219_solar.begin();
-  if (solarINAOK) {
-    Serial.println(F("[INA219] solar OK"));
+  // INA3221 시작
+  // 기본 주소는 보통 0x40
+  if (!ina3221.begin(0x40)) {
+    Serial.println(F("[INA3221] FAIL"));
+    ina3221OK = false;
   } else {
-    Serial.println(F("[INA219] solar FAIL"));
-  }
-
-  batteryINAOK = ina219_battery.begin();
-  if (batteryINAOK) {
-    Serial.println(F("[INA219] battery OK"));
-  } else {
-    Serial.println(F("[INA219] battery FAIL"));
+    Serial.println(F("[INA3221] OK"));
+    ina3221OK = true;
   }
 
   lastSendTime = millis() - SEND_INTERVAL;
@@ -144,56 +149,41 @@ void loop() {
   int soil = calcSoil();
 
   // ----------------------------
-  // INA219 - 태양광
+  // INA3221 - 태양광 / 배터리
   // ----------------------------
-  float solar_busV = 0.0;
-  float solar_shuntV = 0.0;
-  float solar_current_mA = 0.0;
-  float solar_power_mW = 0.0;
-
   float solar_voltage_V = 0.0;
   float solar_current_A = 0.0;
-  float solar_power_W = 0.0;
-
-  if (solarINAOK) {
-    solar_busV = sanitizeFloat(ina219_solar.getBusVoltage_V());
-    solar_shuntV = sanitizeFloat(ina219_solar.getShuntVoltage_mV());
-    solar_current_mA = sanitizeFloat(ina219_solar.getCurrent_mA());
-    solar_power_mW = sanitizeFloat(ina219_solar.getPower_mW());
-
-    solar_voltage_V = sanitizeFloat(solar_busV + (solar_shuntV / 1000.0));
-    solar_current_A = sanitizeFloat(solar_current_mA / 1000.0);
-    solar_power_W = sanitizeFloat(solar_power_mW / 1000.0);
-  }
-
-  // ----------------------------
-  // INA219 - 배터리
-  // ----------------------------
-  float battery_busV = 0.0;
-  float battery_shuntV = 0.0;
-  float battery_current_mA = 0.0;
-  float battery_power_mW = 0.0;
+  float solar_power_W   = 0.0;
 
   float battery_voltage_V = 0.0;
   float battery_current_A = 0.0;
-  float battery_power_W = 0.0;
+  float battery_power_W   = 0.0;
 
-  if (batteryINAOK) {
-    battery_busV = sanitizeFloat(ina219_battery.getBusVoltage_V());
-    battery_shuntV = sanitizeFloat(ina219_battery.getShuntVoltage_mV());
-    battery_current_mA = sanitizeFloat(ina219_battery.getCurrent_mA());
-    battery_power_mW = sanitizeFloat(ina219_battery.getPower_mW());
+  if (ina3221OK) {
+    // 채널 1: 태양광
+    solar_voltage_V = sanitizeFloat(ina3221.getBusVoltage(INA_CH_SOLAR));
+    solar_current_A = sanitizeFloat(ina3221.getCurrentAmps(INA_CH_SOLAR));
+    solar_power_W   = sanitizeFloat(solar_voltage_V * solar_current_A);
 
-    battery_voltage_V = sanitizeFloat(battery_busV + (battery_shuntV / 1000.0));
-    battery_current_A = sanitizeFloat(battery_current_mA / 1000.0);
-    battery_power_W = sanitizeFloat(battery_power_mW / 1000.0);
+    // 채널 2: 배터리
+    battery_voltage_V = sanitizeFloat(ina3221.getBusVoltage(INA_CH_BATTERY));
+    battery_current_A = sanitizeFloat(ina3221.getCurrentAmps(INA_CH_BATTERY));
+    battery_power_W   = sanitizeFloat(battery_voltage_V * battery_current_A);
   }
 
   // ----------------------------
   // 상태 판단
   // ----------------------------
   int soc = estimateSOC(battery_voltage_V);
-  uint8_t mode = calcMode(soc);
+
+  // 배터리 측정이 아직 0 근처면 테스트용으로 풀모드
+  uint8_t mode;
+  if (battery_voltage_V < 1.0) {
+    mode = 2;
+  } else {
+    mode = calcMode(soc);
+  }
+
   bool waterAlert = calcWaterAlert(soil);
 
   // ----------------------------
@@ -202,7 +192,11 @@ void loop() {
   // 펌프: 토양습도 부족 + SOC 20 초과일 때 ON
   bool pumpOn = (waterAlert && soc > 20);
 
-  // 네오픽셀 밝기: 조도 + mode 기반
+  // 배터리 측정이 없으면 펌프는 안전상 OFF
+  if (battery_voltage_V < 1.0) {
+    pumpOn = false;
+  }
+
   int ledBrightness = calcLedBrightness(light, mode);
 
   digitalWrite(PUMP_PIN, pumpOn ? HIGH : LOW);
