@@ -7,10 +7,10 @@
 #   "과거 60분치 데이터를 보고 → 앞으로 1시간 평균 발전량" 예측
 #
 # [실행 후 생성되는 파일]
-#   models/gru.pth
-#   models/scaler_gru.pkl
-#   models/scaler_gru_target.pkl
-#   models/gru_result.png
+#   backend/models/gru.pth
+#   backend/models/scaler_gru.pkl
+#   backend/models/scaler_gru_target.pkl
+#   backend/models/gru_result.png
 #
 # [입력 변수 7개]
 #   solar_power   : 태양광 발전량
@@ -35,7 +35,14 @@ from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
-os.makedirs("models", exist_ok=True)
+
+# ── 경로 설정 ──────────────────────────────────
+# 어느 폴더에서 실행해도 backend/models/ 에 저장됨
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "..", "backend", "models")
+DATA_DIR   = os.path.join(BASE_DIR, "..", "backend", "data")
+CSV_PATH   = os.path.join(DATA_DIR, "sensor_log.csv")
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 random.seed(42); np.random.seed(42); torch.manual_seed(42)
 
@@ -46,23 +53,20 @@ EPOCHS   = 200
 LR       = 0.001
 PATIENCE = 20
 
-# ★ sensor_log.csv 컬럼명에 맞게 수정
 FEATURES = [
-    "solar_power",    # 태양광 발전량(W)
-    "solar_voltage",  # 발전 전압(V)
-    "light",          # 조도(%)
-    "temperature",    # 온도(°C)
-    "hour_sin",       # 시간 sin 인코딩
-    "hour_cos",       # 시간 cos 인코딩
-    "soc",            # 배터리 잔량(%)
+    "solar_power",
+    "solar_voltage",
+    "light",
+    "temperature",
+    "hour_sin",
+    "hour_cos",
+    "soc",
 ]
 TARGET = "solar_power"
 
 
-# ================================================
-# GRU 모델 클래스
-# ★ app_gru.py의 PowerPredictionGRU와 완전히 동일해야 함!
-# ================================================
+# ── GRU 모델 ───────────────────────────────────
+# ★ app.py의 PowerPredictionGRU와 완전히 동일해야 함!
 class PowerPredictionGRU(nn.Module):
     def __init__(self, input_size, hidden_size=32, num_layers=1, dropout=0.0):
         super().__init__()
@@ -134,7 +138,7 @@ def train(model, train_loader, val_loader, device):
         if v_loss < best_val:
             best_val   = v_loss
             best_state = model.state_dict()
-            torch.save(best_state, "models/gru.pth")
+            torch.save(best_state, os.path.join(MODELS_DIR, "gru.pth"))
             wait = 0
         else:
             wait += 1
@@ -149,9 +153,10 @@ def train(model, train_loader, val_loader, device):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"장치: {device}")
+    print(f"CSV 경로: {CSV_PATH}")
+    print(f"모델 저장: {MODELS_DIR}")
 
-    # ★ sensor_log.csv 경로 (backend/ 폴더에서 실행 기준)
-    df = pd.read_csv("data/sensor_log.csv")
+    df = pd.read_csv(CSV_PATH)
     df = df.dropna()
     df = df[df["solar_power"] >= 0]
     df["hour"] = pd.to_datetime(df["timestamp"]).dt.hour
@@ -159,8 +164,6 @@ def main():
 
     if "light" not in df.columns:
         df["light"] = 0.0
-
-    # soc 컬럼 없으면 기본값 100으로 채움
     if "soc" not in df.columns:
         df["soc"] = 100.0
 
@@ -178,8 +181,8 @@ def main():
     train_y = t_scaler.fit_transform(train_df[[TARGET]])
     test_y  = t_scaler.transform(test_df[[TARGET]])
 
-    joblib.dump(f_scaler, "models/scaler_gru.pkl")
-    joblib.dump(t_scaler, "models/scaler_gru_target.pkl")
+    joblib.dump(f_scaler, os.path.join(MODELS_DIR, "scaler_gru.pkl"))
+    joblib.dump(t_scaler, os.path.join(MODELS_DIR, "scaler_gru_target.pkl"))
     print("스케일러 저장 완료")
 
     X_all,  y_all  = create_sequences(train_X, train_y)
@@ -212,7 +215,6 @@ def main():
     print(f"\n MAE: {mae:.3f}W  RMSE: {rmse:.3f}W  R²: {r2:.3f}")
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 4))
-
     axes[0].plot(train_hist, label="Train"); axes[0].plot(val_hist, label="Val")
     axes[0].set_title("Loss Curve"); axes[0].legend(); axes[0].grid(alpha=0.3)
 
@@ -222,8 +224,8 @@ def main():
     axes[1].set_title("실제 vs 예측 발전량"); axes[1].legend(); axes[1].grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("models/gru_result.png", dpi=150)
-    print("그래프 저장 → models/gru_result.png")
+    plt.savefig(os.path.join(MODELS_DIR, "gru_result.png"), dpi=150)
+    print(f"그래프 저장 → {MODELS_DIR}/gru_result.png")
     print("✅ 완료! 다음: python train_water.py")
 
 
