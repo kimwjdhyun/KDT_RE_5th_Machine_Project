@@ -153,7 +153,7 @@ def main():
     print(f"장치: {device}")
 
     # ① 데이터 로드 및 이상값 제거
-    df = pd.read_csv("farm_data.csv")
+    df = pd.read_csv("data/sensor_log.csv")
     df = df.dropna()
     # 센서 오류로 범위 벗어난 값 제거 (between: 양 끝값 포함)
     df = df[df["soil"].between(0, 100)]
