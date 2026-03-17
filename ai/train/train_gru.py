@@ -233,7 +233,7 @@ def main():
     print(f"장치: {device}")
 
     # ① 데이터 로드 및 전처리
-    df = pd.read_csv("farm_data.csv")
+    df = pd.read_csv("data/sensor_log.csv")
     df = df.dropna()           # 결측값(NaN) 있는 행 제거
     df = df[df["power"] >= 0]  # 음수 발전량 제거 (이상값)
     df["hour"] = pd.to_datetime(df["timestamp"]).dt.hour  # timestamp에서 시간 추출
