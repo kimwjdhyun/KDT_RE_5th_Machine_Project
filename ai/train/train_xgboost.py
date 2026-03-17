@@ -186,7 +186,7 @@ rmse = math.sqrt(mean_squared_error(true_w, pred_w))
 r2   = r2_score(true_w, pred_w)
 
 print(f"\n===== XGBoost Result =====")
-print(f"원본 데이터 개수       : {len(pd.read_csv('farm_data.csv'))}")
+print(f"원본 데이터 개수       : {len(pd.read_csv('data/sensor_log.csv'))}")
 print(f"5분 다운샘플링 후      : {len(df)}행")
 print(f"학습 데이터 개수       : {len(train_X)}")
 print(f"테스트 데이터 개수     : {len(test_X)}")
