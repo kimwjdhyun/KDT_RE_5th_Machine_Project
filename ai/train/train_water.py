@@ -7,9 +7,9 @@
 #   "지금 물을 줘야 하나?" 를 AI가 판단하도록 학습
 #
 # [실행 후 생성되는 파일]
-#   models/water.pth
-#   models/scaler_water.pkl
-#   models/water_result.png
+#   backend/models/water.pth
+#   backend/models/scaler_water.pkl
+#   backend/models/water_result.png
 #
 # ★ sensor_log.csv 컬럼명 기준으로 작성
 #   soil        : 토양습도
@@ -30,26 +30,29 @@ from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
-os.makedirs("models", exist_ok=True)  # ★ 경로 수정
+
+# ── 경로 설정 ──────────────────────────────────
+# 어느 폴더에서 실행해도 backend/models/ 에 저장됨
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "..", "backend", "models")
+DATA_DIR   = os.path.join(BASE_DIR, "..", "backend", "data")
+CSV_PATH   = os.path.join(DATA_DIR, "sensor_log.csv")
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 random.seed(42); np.random.seed(42); torch.manual_seed(42)
 
-BATCH    = 32
-EPOCHS   = 100
-LR       = 0.001
-PATIENCE = 15
-
+BATCH           = 32
+EPOCHS          = 100
+LR              = 0.001
+PATIENCE        = 15
 WATER_THRESHOLD = 40.0
 
-# ★ sensor_log.csv 컬럼명에 맞게 수정
 FEATURES = ["soil", "temperature", "humidity"]
 TARGET   = "water_label"
 
 
-# ================================================
-# 급수 분류 모델 (WaterClassifier)
-# ★ app_gru.py의 WaterClassifier와 완전히 동일해야 함!
-# ================================================
+# ── 급수 분류 모델 ─────────────────────────────
+# ★ app.py의 WaterClassifier와 완전히 동일해야 함!
 class WaterClassifier(nn.Module):
     def __init__(self):
         super().__init__()
@@ -97,7 +100,7 @@ def train(model, train_loader, val_loader, device):
         if v_loss < best_val:
             best_val   = v_loss
             best_state = model.state_dict()
-            torch.save(best_state, "models/water.pth")
+            torch.save(best_state, os.path.join(MODELS_DIR, "water.pth"))
             wait = 0
         else:
             wait += 1
@@ -112,9 +115,10 @@ def train(model, train_loader, val_loader, device):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"장치: {device}")
+    print(f"CSV 경로: {CSV_PATH}")
+    print(f"모델 저장: {MODELS_DIR}")
 
-    # ★ sensor_log.csv 경로 (backend/ 폴더에서 실행 기준)
-    df = pd.read_csv("data/sensor_log.csv")
+    df = pd.read_csv(CSV_PATH)
     df = df.dropna()
     df = df[df["soil"].between(0, 100)]
     df = df[df["temperature"].between(0, 50)]
@@ -137,7 +141,7 @@ def main():
     train_y = train_df[TARGET].values.reshape(-1, 1).astype(np.float32)
     test_y  = test_df[TARGET].values.reshape(-1, 1).astype(np.float32)
 
-    joblib.dump(scaler, "models/scaler_water.pkl")
+    joblib.dump(scaler, os.path.join(MODELS_DIR, "scaler_water.pkl"))
     print("스케일러 저장 완료")
 
     val_size = int(len(train_X) * 0.2)
@@ -173,8 +177,8 @@ def main():
     plt.title("급수 분류 모델 - 예측 확률 분포")
     plt.legend(); plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig("models/water_result.png", dpi=150)  # ★ 경로 수정
-    print("그래프 저장 → models/water_result.png")
+    plt.savefig(os.path.join(MODELS_DIR, "water_result.png"), dpi=150)
+    print(f"그래프 저장 → {MODELS_DIR}/water_result.png")
     print("✅ 완료!")
 
 
