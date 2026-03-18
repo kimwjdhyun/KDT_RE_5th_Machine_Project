@@ -1,4 +1,4 @@
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = process.env.REACT_APP_API_BASE || "http://192.168.201.138:5000";
 
 async function fetchJSON(url) {
   const res = await fetch(url);
