@@ -25,6 +25,19 @@
 #define INA_CH_BATTERY    1
 #define INA_CH_SPARE      2
 
+// LED 히스테리시스 기준
+#define LED_ON_THRESHOLD   65
+#define LED_OFF_THRESHOLD  75
+
+// 토양센서 보정값
+#define SOIL_WET           50   // 아주 젖은 상태
+#define SOIL_DRY          150   // 마른 상태
+
+// 급수 설정
+#define WATER_THRESHOLD    40   // soil %가 40 미만이면 급수 후보
+#define PUMP_DURATION_MS 3000UL // 3초 급수
+#define PUMP_COOLDOWN_MS 60000UL // 급수 후 60초 대기
+
 DHT dht(DHT_PIN, DHT_TYPE);
 Adafruit_INA3221 ina3221;
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -33,6 +46,12 @@ unsigned long lastSendTime = 0;
 unsigned long lastPrintTime = 0;
 
 bool ina3221OK = false;
+bool ledOnState = false;
+
+// 펌프 상태 관리
+bool pumpRunning = false;
+unsigned long pumpStartTime = 0;
+unsigned long lastPumpEndTime = 0;
 
 // ----------------------------
 // 유틸
@@ -46,9 +65,16 @@ int calcLight() {
   return map(analogRead(LDR_PIN), 0, 1023, 0, 100);
 }
 
-int calcSoil() {
-  int raw = constrain(analogRead(SOIL_PIN), 300, 1023);
-  return map(raw, 300, 1023, 100, 0);
+// ----------------------------
+// 토양센서
+// ----------------------------
+int readSoilRaw() {
+  return analogRead(SOIL_PIN);
+}
+
+int calcSoilPercent(int raw) {
+  raw = constrain(raw, SOIL_WET, SOIL_DRY);
+  return map(raw, SOIL_DRY, SOIL_WET, 0, 100);
 }
 
 int estimateSOC(float voltage) {
@@ -65,40 +91,81 @@ uint8_t calcMode(int soc) {
   return 2;
 }
 
-bool calcWaterAlert(int soil) {
-  return soil < 40;
+bool calcWaterAlert(int soilPercent) {
+  return soilPercent < WATER_THRESHOLD;
 }
 
-// 스마트팜용 LED 로직
-// 밝으면 꺼지고, 어두우면 켜짐
-int calcLedBrightness(int light, uint8_t mode) {
-  // 배터리 매우 부족하면 최소 밝기만 유지
+// ----------------------------
+// LED 히스테리시스
+// ----------------------------
+bool shouldLedOnHysteresis(int light, uint8_t mode) {
   if (mode == 0) {
-    if (light <= 70) return 30;
-    return 0;
+    ledOnState = false;
+    return ledOnState;
   }
 
-  // 밝으면 LED OFF
-  if (light > 70) return 0;
-
-  // 어두울수록 밝게
-  int brightness = map(light, 0, 70, 255, 50);
-
-  if (mode == 1) {
-    brightness /= 2;
+  if (light <= LED_ON_THRESHOLD) {
+    ledOnState = true;
+  } else if (light >= LED_OFF_THRESHOLD) {
+    ledOnState = false;
   }
-
-  return constrain(brightness, 0, 255);
+  return ledOnState;
 }
 
-void updateNeoPixelPurple(int brightness) {
+void updateNeoPixelPurple(bool ledOn) {
+  int brightness = ledOn ? 100 : 0;
+
   strip.setBrightness(brightness);
 
   for (int i = 0; i < NUM_PIXELS; i++) {
-    strip.setPixelColor(i, strip.Color(180, 0, 255));
+    strip.setPixelColor(i, ledOn ? strip.Color(180, 0, 255) : 0);
   }
 
   strip.show();
+}
+
+// ----------------------------
+// 펌프 제어
+// ----------------------------
+void updatePumpControl(bool waterAlert, int soc, float battery_voltage_V) {
+  unsigned long now = millis();
+
+  // 이미 펌프 작동 중이면 3초 후 종료
+  if (pumpRunning) {
+    if (now - pumpStartTime >= PUMP_DURATION_MS) {
+      digitalWrite(PUMP_PIN, LOW);
+      pumpRunning = false;
+      lastPumpEndTime = now;
+    }
+    return;
+  }
+
+  // 배터리 측정 실패면 급수 금지
+  if (battery_voltage_V < 1.0) {
+    digitalWrite(PUMP_PIN, LOW);
+    return;
+  }
+
+  // SOC 낮으면 급수 금지
+  if (soc <= 20) {
+    digitalWrite(PUMP_PIN, LOW);
+    return;
+  }
+
+  // 쿨다운 중이면 급수 금지
+  if (now - lastPumpEndTime < PUMP_COOLDOWN_MS) {
+    digitalWrite(PUMP_PIN, LOW);
+    return;
+  }
+
+  // 토양 부족하면 3초 급수 시작
+  if (waterAlert) {
+    digitalWrite(PUMP_PIN, HIGH);
+    pumpRunning = true;
+    pumpStartTime = now;
+  } else {
+    digitalWrite(PUMP_PIN, LOW);
+  }
 }
 
 // ----------------------------
@@ -112,14 +179,15 @@ void setup() {
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(PUMP_PIN, LOW);
 
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+
   strip.begin();
   strip.clear();
   strip.show();
 
   Serial.println(F("[MASTER] 시작"));
 
-  // INA3221 시작
-  // 기본 주소는 보통 0x40
   if (!ina3221.begin(0x40)) {
     Serial.println(F("[INA3221] FAIL"));
     ina3221OK = false;
@@ -146,7 +214,9 @@ void loop() {
   if (isnan(humidity)) humidity = 0.0;
 
   int light = calcLight();
-  int soil = calcSoil();
+
+  int soilRaw = readSoilRaw();
+  int soil = calcSoilPercent(soilRaw);
 
   // ----------------------------
   // INA3221 - 태양광 / 배터리
@@ -160,12 +230,10 @@ void loop() {
   float battery_power_W   = 0.0;
 
   if (ina3221OK) {
-    // 채널 1: 태양광
     solar_voltage_V = sanitizeFloat(ina3221.getBusVoltage(INA_CH_SOLAR));
     solar_current_A = sanitizeFloat(ina3221.getCurrentAmps(INA_CH_SOLAR));
     solar_power_W   = sanitizeFloat(solar_voltage_V * solar_current_A);
 
-    // 채널 2: 배터리
     battery_voltage_V = sanitizeFloat(ina3221.getBusVoltage(INA_CH_BATTERY));
     battery_current_A = sanitizeFloat(ina3221.getCurrentAmps(INA_CH_BATTERY));
     battery_power_W   = sanitizeFloat(battery_voltage_V * battery_current_A);
@@ -176,10 +244,9 @@ void loop() {
   // ----------------------------
   int soc = estimateSOC(battery_voltage_V);
 
-  // 배터리 측정이 아직 0 근처면 테스트용으로 풀모드
   uint8_t mode;
   if (battery_voltage_V < 1.0) {
-    mode = 2;
+    mode = 0;  // 측정 실패 시 보수적으로 절전
   } else {
     mode = calcMode(soc);
   }
@@ -189,21 +256,15 @@ void loop() {
   // ----------------------------
   // 제어 로직
   // ----------------------------
-  // 펌프: 토양습도 부족 + SOC 20 초과일 때 ON
-  bool pumpOn = (waterAlert && soc > 20);
+  updatePumpControl(waterAlert, soc, battery_voltage_V);
 
-  // 배터리 측정이 없으면 펌프는 안전상 OFF
-  if (battery_voltage_V < 1.0) {
-    pumpOn = false;
-  }
+  bool ledOn = shouldLedOnHysteresis(light, mode);
+  int ledBrightness = ledOn ? 100 : 0;
 
-  int ledBrightness = calcLedBrightness(light, mode);
-
-  digitalWrite(PUMP_PIN, pumpOn ? HIGH : LOW);
-  updateNeoPixelPurple(ledBrightness);
+  updateNeoPixelPurple(ledOn);
 
   int pumpState = digitalRead(PUMP_PIN);
-  int ledState = (ledBrightness > 0) ? 1 : 0;
+  int ledState = ledOn ? 1 : 0;
 
   // ----------------------------
   // 디버그 출력
@@ -217,7 +278,10 @@ void loop() {
     Serial.print(humidity, 1);
     Serial.print(F(" L="));
     Serial.print(light);
-    Serial.print(F(" S="));
+
+    Serial.print(F(" SOIL_RAW="));
+    Serial.print(soilRaw);
+    Serial.print(F(" SOIL="));
     Serial.print(soil);
 
     Serial.print(F(" SV="));
@@ -257,6 +321,7 @@ void loop() {
     Serial.print("{");
     Serial.print("\"temperature\":"); Serial.print(temperature, 1); Serial.print(",");
     Serial.print("\"humidity\":"); Serial.print(humidity, 1); Serial.print(",");
+    Serial.print("\"soil_raw\":"); Serial.print(soilRaw); Serial.print(",");
     Serial.print("\"soil\":"); Serial.print(soil); Serial.print(",");
     Serial.print("\"light\":"); Serial.print(light); Serial.print(",");
 

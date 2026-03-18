@@ -33,11 +33,18 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # ── 경로 설정 ──────────────────────────────────
 # 어느 폴더에서 실행해도 backend/models/ 에 저장됨
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-MODELS_DIR = os.path.join(BASE_DIR, "..", "backend", "models")
-DATA_DIR   = os.path.join(BASE_DIR, "..", "backend", "data")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
+
+MODELS_DIR = os.path.join(PROJECT_ROOT, "backend", "models")
+DATA_DIR   = os.path.join(PROJECT_ROOT, "backend", "data")
 CSV_PATH   = os.path.join(DATA_DIR, "sensor_log.csv")
+
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+print("CSV 경로:", CSV_PATH)
+print("모델 저장:", MODELS_DIR)
 
 random.seed(42); np.random.seed(42); torch.manual_seed(42)
 
