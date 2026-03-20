@@ -13,9 +13,16 @@ import serial
 from flask import Flask, jsonify
 from flask_cors import CORS
 
+# =========================================================
+# Flask 앱 설정
+# - CORS 허용: 프론트엔드에서 API 호출 가능하도록 설정
+# =========================================================
 app = Flask(__name__)
 CORS(app)
 
+# =========================================================
+# 경로 설정
+# =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
@@ -27,28 +34,40 @@ XGB_MODEL_FILE = os.path.join(MODEL_DIR, "xgboost_model.pkl")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# =========================================================
+# 시리얼 통신 설정
+# - Arduino가 연결된 포트와 baud rate
+# =========================================================
 SERIAL_PORT = "COM3"
 BAUD_RATE = 9600
 
+# =========================================================
+# 메모리 캐시
+# - latest_row       : 가장 최근 센서 데이터 1개
+# - history_memory   : 프론트 응답용 최근 데이터 목록
+# - recent_raw_buffer: 실시간 예측 feature 생성용 원본 버퍼
+# =========================================================
 latest_row = None
 history_memory = deque(maxlen=300)
 
-# 10초 간격 기준 약 2시간 보관
-recent_raw_buffer = deque(maxlen=720)
+# 10초 간격 기준 1000개면 약 2시간 45분 정도
+recent_raw_buffer = deque(maxlen=1000)
 
-# ----------------------------
-# XGBoost 모델 로드
-# ----------------------------
+# =========================================================
+# XGBoost 모델 관련 전역 변수
+# =========================================================
 xgb_model = None
 xgb_feature_cols = None
 xgb_pred_step = 12
 xgb_resample_rule = "5min"
+xgb_day_power_threshold = 0.05
+xgb_feature_set_name = None
 xgb_ready = False
 
 
-# ----------------------------
-# 유틸
-# ----------------------------
+# =========================================================
+# 공통 유틸 함수
+# =========================================================
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
@@ -80,7 +99,8 @@ def safe_int(value, default=0):
 
 def normalize_row(row: dict) -> dict:
     """
-    예전 로그/현재 로그 모두 19컬럼 구조로 정규화
+    센서 row를 프로젝트 표준 19개 컬럼 구조로 맞춘다.
+    JSON/CSV/메모리 저장 형식을 항상 동일하게 유지하는 역할.
     """
     if not isinstance(row, dict):
         return None
@@ -111,12 +131,13 @@ def normalize_row(row: dict) -> dict:
         "water_alert": safe_int(row.get("water_alert", 0), 0),
     }
 
-    # solar_power / battery_power가 0 또는 비정상일 경우 재계산
+    # 발전량이 비어 있으면 전압 * 전류로 보정
     if normalized["solar_power"] <= 0:
         normalized["solar_power"] = round(
             max(0.0, normalized["solar_voltage"] * normalized["solar_current"]), 2
         )
 
+    # 배터리 전력도 비어 있으면 전압 * 전류로 계산
     if normalized["battery_power"] == 0 and (
         normalized["battery_voltage"] != 0 or normalized["battery_current"] != 0
     ):
@@ -127,38 +148,61 @@ def normalize_row(row: dict) -> dict:
     return normalized
 
 
+# =========================================================
+# XGBoost 모델 로드
+# =========================================================
 def load_xgb_model():
-    global xgb_model, xgb_feature_cols, xgb_pred_step, xgb_resample_rule, xgb_ready
+    """
+    train_xgboost.py에서 저장한 xgboost_model.pkl을 불러온다.
+    모델 자체뿐 아니라 feature_cols, resample_rule 같은 설정도 함께 읽는다.
+    """
+    global xgb_model, xgb_feature_cols, xgb_pred_step
+    global xgb_resample_rule, xgb_day_power_threshold
+    global xgb_feature_set_name, xgb_ready
 
     xgb_model = None
     xgb_feature_cols = None
     xgb_pred_step = 12
     xgb_resample_rule = "5min"
+    xgb_day_power_threshold = 0.05
+    xgb_feature_set_name = None
     xgb_ready = False
 
-    if os.path.exists(XGB_MODEL_FILE):
-        try:
-            bundle = joblib.load(XGB_MODEL_FILE)
-
-            if isinstance(bundle, dict):
-                xgb_model = bundle.get("model")
-                xgb_feature_cols = bundle.get("feature_cols")
-                xgb_pred_step = bundle.get("pred_step", 12)
-                xgb_resample_rule = bundle.get("resample_rule", "5min")
-            else:
-                xgb_model = bundle
-
-            xgb_ready = xgb_model is not None and xgb_feature_cols is not None
-            print("✅ XGBoost 모델 로드 완료" if xgb_ready else "⚠️ XGBoost 모델 형식 확인 필요")
-        except Exception as e:
-            print(f"⚠️ XGBoost 모델 로드 실패: {e}")
-    else:
+    if not os.path.exists(XGB_MODEL_FILE):
         print("⚠️ XGBoost 모델 없음 → pred_1h는 0.0으로 동작")
+        return
+
+    try:
+        bundle = joblib.load(XGB_MODEL_FILE)
+
+        if isinstance(bundle, dict):
+            xgb_model = bundle.get("model")
+            xgb_feature_cols = bundle.get("feature_cols")
+            xgb_pred_step = bundle.get("pred_step", 12)
+            xgb_resample_rule = bundle.get("resample_rule", "5min")
+            xgb_day_power_threshold = bundle.get("day_power_threshold", 0.05)
+            xgb_feature_set_name = bundle.get("feature_set_name")
+        else:
+            xgb_model = bundle
+
+        xgb_ready = xgb_model is not None and xgb_feature_cols is not None
+
+        if xgb_ready:
+            print(f"✅ XGBoost 모델 로드 완료: {XGB_MODEL_FILE}")
+            print(f"   - feature 개수: {len(xgb_feature_cols)}")
+            print(f"   - pred_step: {xgb_pred_step}")
+            print(f"   - resample_rule: {xgb_resample_rule}")
+            print(f"   - feature_set_name: {xgb_feature_set_name}")
+        else:
+            print("⚠️ XGBoost 모델 형식 확인 필요")
+
+    except Exception as e:
+        print(f"⚠️ XGBoost 모델 로드 실패: {e}")
 
 
-# ----------------------------
-# JSON 저장/조회
-# ----------------------------
+# =========================================================
+# JSON 저장 / 조회
+# =========================================================
 def load_logs():
     if not os.path.exists(JSON_FILE):
         return []
@@ -199,9 +243,9 @@ def append_log_json(row: dict, max_keep: int = 300):
     return logs
 
 
-# ----------------------------
+# =========================================================
 # CSV 저장
-# ----------------------------
+# =========================================================
 CSV_COLUMNS = [
     "timestamp",
     "temperature",
@@ -248,15 +292,55 @@ def append_log(row: dict, max_keep: int = 300):
     history_memory.append(row)
 
 
-# ----------------------------
+def load_recent_csv_rows(max_rows=1000):
+    """
+    서버 시작 시 최근 CSV 데이터를 읽어
+    recent_raw_buffer와 history_memory를 복원할 때 사용한다.
+    JSON보다 CSV가 더 길게 쌓여 있으므로 실시간 예측 버퍼 복원에 유리하다.
+    """
+    if not os.path.exists(CSV_FILE):
+        return []
+
+    try:
+        try:
+            df = pd.read_csv(CSV_FILE, on_bad_lines="skip", encoding="utf-8")
+        except TypeError:
+            df = pd.read_csv(CSV_FILE, error_bad_lines=False, encoding="utf-8")
+
+        if df.empty:
+            return []
+
+        df = df.tail(max_rows).copy()
+        rows = []
+
+        for _, row in df.iterrows():
+            nrow = normalize_row(row.to_dict())
+            if nrow is not None:
+                rows.append(nrow)
+
+        return rows
+
+    except Exception as e:
+        print("[CSV 로드 실패]", e)
+        return []
+
+
+# =========================================================
 # XGBoost 실시간 예측용 feature 생성
-# ----------------------------
+# =========================================================
 def build_live_feature_from_buffer():
+    """
+    recent_raw_buffer에 쌓인 최근 원본 데이터를 이용해
+    현재 시점 예측용 feature 1줄을 만든다.
+
+    주의:
+    - 현재 모델은 base_trend 계열 feature를 쓸 수 있으므로
+      5분 리샘플 후 최소 24행 정도는 있어야 rolling 24 계산이 가능하다.
+    """
     if not xgb_ready:
         return None
 
-    # 버퍼가 너무 적으면 예측 안 함
-    if len(recent_raw_buffer) < 180:
+    if len(recent_raw_buffer) < 200:
         return None
 
     try:
@@ -264,7 +348,6 @@ def build_live_feature_from_buffer():
         if df.empty or "timestamp" not in df.columns:
             return None
 
-        # 누락 컬럼 보정
         for col in CSV_COLUMNS:
             if col not in df.columns:
                 df[col] = 0
@@ -286,35 +369,60 @@ def build_live_feature_from_buffer():
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # 발전량 보정
         df["solar_power"] = df["solar_power"].fillna(df["solar_voltage"] * df["solar_current"])
         df["solar_power"] = df["solar_power"].clip(lower=0)
 
-        # 전압/전류 기반 보정
         df["battery_power"] = df["battery_power"].fillna(df["battery_voltage"] * df["battery_current"])
 
+        # 학습과 동일한 5분 리샘플
         df = df.set_index("timestamp")
         df = df.resample(xgb_resample_rule).mean(numeric_only=True)
         df = df.dropna(how="all").reset_index()
 
-        if len(df) < 8:
+        print(f"[XGB] resampled rows={len(df)}")
+
+        # rolling 24 계산 가능하도록 최소 24행 필요
+        if len(df) < 24:
             return None
 
+        # 시간 파생변수
         df["hour"] = df["timestamp"].dt.hour
         df["minute"] = df["timestamp"].dt.minute
+        df["dayofweek"] = df["timestamp"].dt.dayofweek
+
         df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
         df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
+        df["minute_sin"] = np.sin(2 * np.pi * df["minute"] / 60)
+        df["minute_cos"] = np.cos(2 * np.pi * df["minute"] / 60)
 
-        df["power_lag_1"] = df["solar_power"].shift(1)
-        df["power_lag_2"] = df["solar_power"].shift(2)
-        df["power_lag_3"] = df["solar_power"].shift(3)
+        # lag feature
+        for lag in [1, 2, 3, 6, 12]:
+            df[f"power_lag_{lag}"] = df["solar_power"].shift(lag)
+            df[f"light_lag_{lag}"] = df["light"].shift(lag)
 
-        df["recent_mean_power_3"] = df["solar_power"].rolling(window=3).mean()
-        df["recent_mean_power_6"] = df["solar_power"].rolling(window=6).mean()
+        # rolling feature
+        for window in [3, 6, 12, 24]:
+            df[f"power_mean_{window}"] = df["solar_power"].rolling(window).mean()
+            df[f"power_std_{window}"] = df["solar_power"].rolling(window).std()
+            df[f"power_max_{window}"] = df["solar_power"].rolling(window).max()
+            df[f"power_min_{window}"] = df["solar_power"].rolling(window).min()
 
-        df["power_trend_3"] = df["solar_power"] - df["recent_mean_power_3"]
-        df["power_diff_1"] = df["solar_power"] - df["power_lag_1"]
-        df["power_std_6"] = df["solar_power"].rolling(window=6).std()
+        for window in [3, 6, 12]:
+            df[f"light_mean_{window}"] = df["light"].rolling(window).mean()
+
+        # 변화량 feature
+        df["power_diff_1"] = df["solar_power"].diff(1)
+        df["power_diff_3"] = df["solar_power"].diff(3)
+        df["power_diff_6"] = df["solar_power"].diff(6)
+
+        df["light_diff_1"] = df["light"].diff(1)
+        df["light_diff_3"] = df["light"].diff(3)
+
+        # 기타 파생 feature
+        df["voltage_current_mul"] = df["solar_voltage"] * df["solar_current"]
+        df["battery_eff_gap"] = df["battery_voltage"] - df["solar_voltage"]
+        df["is_day_by_hour"] = ((df["hour"] >= 6) & (df["hour"] <= 18)).astype(int)
+        df["is_active_now"] = (df["solar_power"] > xgb_day_power_threshold).astype(int)
 
         df = df.dropna().reset_index(drop=True)
         if df.empty:
@@ -322,14 +430,11 @@ def build_live_feature_from_buffer():
 
         latest = df.iloc[[-1]].copy()
 
-        # 모델이 요구하는 컬럼이 없으면 0으로 보정
         for col in xgb_feature_cols:
             if col not in latest.columns:
                 latest[col] = 0.0
 
         X_live = latest[xgb_feature_cols].copy()
-
-        # 최종 숫자형 보정
         X_live = X_live.apply(pd.to_numeric, errors="coerce").fillna(0)
 
         return X_live
@@ -340,6 +445,9 @@ def build_live_feature_from_buffer():
 
 
 def predict_power_1h_xgb():
+    """
+    최근 버퍼 기준으로 1시간 후 발전량 예측값 반환
+    """
     if not xgb_ready:
         return 0.0
 
@@ -350,6 +458,7 @@ def predict_power_1h_xgb():
 
         pred = xgb_model.predict(X_live)[0]
         pred = max(0.0, float(pred))
+        print(f"[XGB] pred_1h={pred:.2f}")
         return round(pred, 2)
 
     except Exception as e:
@@ -357,10 +466,14 @@ def predict_power_1h_xgb():
         return 0.0
 
 
-# ----------------------------
+# =========================================================
 # 시리얼 데이터 처리
-# ----------------------------
+# =========================================================
 def build_row_from_serial(data: dict) -> dict:
+    """
+    Arduino JSON 데이터를 표준 row 구조로 변환한다.
+    이 시점에 XGBoost 예측값 pred_1h도 함께 계산한다.
+    """
     temperature = safe_float(data.get("temperature", 0), 0)
     humidity = safe_float(data.get("humidity", 0), 0)
 
@@ -376,7 +489,6 @@ def build_row_from_serial(data: dict) -> dict:
         solar_power = solar_voltage * solar_current
     else:
         solar_power = safe_float(incoming_solar_power, 0)
-
     solar_power = max(0.0, solar_power)
 
     battery_voltage = safe_float(data.get("battery_voltage", 0), 0)
@@ -425,6 +537,9 @@ def build_row_from_serial(data: dict) -> dict:
 
 
 def serial_reader():
+    """
+    백그라운드 스레드에서 시리얼 포트를 계속 읽는다.
+    """
     global latest_row
 
     while True:
@@ -442,15 +557,15 @@ def serial_reader():
 
                     print("[RAW]", raw)
 
+                    # 디버그성 메시지는 무시
                     if raw.startswith("[DEBUG]") or raw.startswith("[MASTER]") or raw.startswith("[INA"):
                         continue
 
+                    # JSON 문자열만 실제 데이터로 처리
                     if raw.startswith("{") and raw.endswith("}"):
                         try:
                             data = json.loads(raw)
 
-                            # 예측용 버퍼에는 "현재 pred_1h 계산 전" 상태보다
-                            # 현재 row를 넣는 편이 전체 구조상 일관적
                             row = build_row_from_serial(data)
 
                             latest_row = row
@@ -458,6 +573,7 @@ def serial_reader():
                             append_log(row)
 
                             print("[DATA 저장 완료]", row)
+
                         except json.JSONDecodeError:
                             print("[JSON 파싱 실패]", raw)
                         except Exception as e:
@@ -473,16 +589,17 @@ def serial_reader():
             time.sleep(3)
 
 
-# ----------------------------
-# API
-# ----------------------------
+# =========================================================
+# API 엔드포인트
+# =========================================================
 @app.route("/api/hello", methods=["GET"])
 def hello():
     return jsonify({
         "message": "Flask 서버 정상 실행 중 ✅",
         "serial_port": SERIAL_PORT,
         "xgb_ready": xgb_ready,
-        "buffer_size": len(recent_raw_buffer)
+        "buffer_size": len(recent_raw_buffer),
+        "feature_set_name": xgb_feature_set_name,
     })
 
 
@@ -494,7 +611,9 @@ def health():
         "history_count": len(history_memory),
         "serial_port": SERIAL_PORT,
         "xgb_ready": xgb_ready,
-        "buffer_size": len(recent_raw_buffer)
+        "buffer_size": len(recent_raw_buffer),
+        "feature_count": len(xgb_feature_cols) if xgb_feature_cols else 0,
+        "resample_rule": xgb_resample_rule,
     })
 
 
@@ -521,6 +640,16 @@ def get_data():
     return jsonify(logs[-50:] if logs else [])
 
 
+@app.route("/api/predict", methods=["GET"])
+def get_predict():
+    pred_1h = predict_power_1h_xgb()
+    return jsonify({
+        "xgb_ready": xgb_ready,
+        "pred_1h": pred_1h,
+        "feature_set_name": xgb_feature_set_name,
+    })
+
+
 @app.route("/stats", methods=["GET"])
 @app.route("/api/stats", methods=["GET"])
 def stats():
@@ -535,6 +664,7 @@ def stats():
             "avg_temperature": 0,
             "avg_humidity": 0,
             "avg_battery_voltage": 0,
+            "avg_pred_1h": 0,
             "xgb_ready": xgb_ready
         })
 
@@ -552,6 +682,10 @@ def stats():
         sum(safe_float(d.get("battery_voltage", 0), 0) for d in logs) / total_count, 2
     )
 
+    avg_pred_1h = round(
+        sum(safe_float(d.get("pred_1h", 0), 0) for d in logs) / total_count, 2
+    )
+
     return jsonify({
         "count": total_count,
         "total_solar_generation": round(total_solar_generation, 2),
@@ -559,37 +693,49 @@ def stats():
         "avg_temperature": avg_temperature,
         "avg_humidity": avg_humidity,
         "avg_battery_voltage": avg_battery_voltage,
+        "avg_pred_1h": avg_pred_1h,
         "xgb_ready": xgb_ready
     })
 
 
 @app.route("/csv-status", methods=["GET"])
+@app.route("/api/csv-status", methods=["GET"])
 def csv_status():
     return jsonify({
         "csv_exists": os.path.exists(CSV_FILE),
         "csv_file": CSV_FILE,
         "json_file": JSON_FILE,
         "xgb_model_file": XGB_MODEL_FILE,
-        "xgb_ready": xgb_ready
+        "xgb_ready": xgb_ready,
+        "feature_set_name": xgb_feature_set_name,
     })
 
 
-# ----------------------------
-# 시작
-# ----------------------------
+# =========================================================
+# 서버 시작
+# =========================================================
 if __name__ == "__main__":
     ensure_csv_exists()
     load_xgb_model()
 
+    # 1) history_memory는 최근 JSON 300개 유지
     loaded_logs = load_logs()[-300:]
     for row in loaded_logs:
         nrow = normalize_row(row)
         if nrow is not None:
             history_memory.append(nrow)
+
+    # 2) 예측용 버퍼는 CSV에서 최근 1000개 복원
+    recent_rows = load_recent_csv_rows(1000)
+    for row in recent_rows:
+        nrow = normalize_row(row)
+        if nrow is not None:
             recent_raw_buffer.append(nrow)
 
     if loaded_logs:
         latest_row = normalize_row(loaded_logs[-1])
+    elif recent_rows:
+        latest_row = normalize_row(recent_rows[-1])
 
     print(f"[INIT] history_memory={len(history_memory)}")
     print(f"[INIT] recent_raw_buffer={len(recent_raw_buffer)}")

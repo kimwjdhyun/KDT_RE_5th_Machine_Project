@@ -246,7 +246,7 @@ void loop() {
 
   uint8_t mode;
   if (battery_voltage_V < 1.0) {
-    mode = 0;  // 측정 실패 시 보수적으로 절전
+    mode = 2;  // 측정 실패 시 보수적으로 절전
   } else {
     mode = calcMode(soc);
   }

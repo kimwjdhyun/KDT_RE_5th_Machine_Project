@@ -86,6 +86,12 @@ function getCardStatus(type, latest) {
     return "normal";
   }
 
+  if (type === "pred_1h") {
+    const pred = Number(latest.pred_1h);
+    if (pred <= 0) return "warning";
+    return "normal";
+  }
+
   return "";
 }
 
@@ -204,7 +210,59 @@ function App() {
 
   const systemOnline = health?.status === "ok";
   const sensorActive = !!health?.latest_exists;
-  const aiActive = !!stats?.xgb_ready;
+  const aiActive = !!health?.xgb_ready;
+
+  const predGap = latest
+    ? Math.abs(Number(latest.solar_power || 0) - Number(latest.pred_1h || 0))
+    : null;
+
+  const predictionPending =
+    latest && Number(latest.pred_1h) === 0 && !!health?.xgb_ready;
+
+  const predictionInsight = useMemo(() => {
+    if (!latest) return "-";
+
+    const current = Number(latest.solar_power || 0);
+    const pred = Number(latest.pred_1h || 0);
+    const diff = pred - current;
+
+    if (!health?.xgb_ready) return "AI 모델 비활성";
+    if (pred === 0) return "예측 준비 중";
+
+    if (diff > 0.2) return "📈 1시간 후 발전 증가 예상";
+    if (diff < -0.2) return "📉 1시간 후 발전 감소 예상";
+    return "➡️ 1시간 후 발전 유지 예상";
+  }, [latest, health]);
+
+  const predGapStatus = useMemo(() => {
+    if (predGap === null) return "-";
+    if (predGap < 0.2) return "🟢 안정";
+    if (predGap < 0.5) return "🟡 변동 주의";
+    return "🔴 급변 가능";
+  }, [predGap]);
+
+  const systemSummary = useMemo(() => {
+    if (!latest) return "데이터 수신 대기 중";
+
+    const parts = [];
+
+    if (Number(latest.soc) >= 40) parts.push("배터리 안정");
+    else if (Number(latest.soc) >= 20) parts.push("배터리 주의");
+    else parts.push("배터리 부족");
+
+    if (Number(latest.soil) >= 40) parts.push("토양 양호");
+    else parts.push("급수 필요");
+
+    if (Number(latest.pred_1h) > Number(latest.solar_power) + 0.2) {
+      parts.push("발전 증가 예상");
+    } else if (Number(latest.pred_1h) < Number(latest.solar_power) - 0.2) {
+      parts.push("발전 감소 예상");
+    } else if (Number(latest.pred_1h) > 0) {
+      parts.push("발전 유지 예상");
+    }
+
+    return parts.join(" · ");
+  }, [latest]);
 
   const chartPalette = useMemo(() => {
     if (dark) {
@@ -440,6 +498,16 @@ function App() {
         <span className={`status-pill ${aiActive ? "status-on" : "status-off"}`}>
           {aiActive ? "🤖 AI Prediction Running" : "🤖 AI Idle"}
         </span>
+
+        {!!health?.feature_count && (
+          <span className="status-pill status-on">
+            🧠 XGBoost · {health.feature_count} features
+          </span>
+        )}
+      </div>
+
+      <div className="status-badges">
+        <div className="badge badge-energy">🧾 상태 요약: {systemSummary}</div>
       </div>
 
       {errorMsg && <div className="error-banner">⚠ {errorMsg}</div>}
@@ -448,6 +516,12 @@ function App() {
         <div className="status-badges">
           {waterNeeded && <div className="badge badge-water">💧 급수 필요! (토양습도 40% 미만 또는 water_alert 감지)</div>}
           {energyLow && <div className="badge badge-energy">⚡ 에너지 부족! (SOC 20% 미만 또는 긴급절전 모드)</div>}
+        </div>
+      )}
+
+      {predictionPending && (
+        <div className="status-badges">
+          <div className="badge badge-energy">🤖 AI 예측 준비 중이거나 야간 구간일 수 있습니다.</div>
         </div>
       )}
 
@@ -460,9 +534,26 @@ function App() {
           />
 
           <DashboardCard
-            title={<Title emoji="🤖" text="1시간 예측" />}
+            title={<Title emoji="🤖" text="1시간 후 예측 발전량" />}
             value={latest ? formatNumber(latest.pred_1h) : "-"}
             unit="W"
+            status={getCardStatus("pred_1h", latest)}
+          />
+
+          <DashboardCard
+            title={<Title emoji="📏" text="현재-예측 차이" />}
+            value={predGap !== null ? formatNumber(predGap) : "-"}
+            unit="W"
+          />
+
+          <DashboardCard
+            title={<Title emoji="🧠" text="AI 해석" />}
+            value={predictionInsight}
+          />
+
+          <DashboardCard
+            title={<Title emoji="📊" text="예측 차이 상태" />}
+            value={predGapStatus}
           />
 
           <DashboardCard
