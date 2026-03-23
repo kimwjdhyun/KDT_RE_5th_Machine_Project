@@ -26,17 +26,24 @@
 #define INA_CH_SPARE      2
 
 // LED 히스테리시스 기준
-#define LED_ON_THRESHOLD   65
+#define LED_ON_THRESHOLD   55
 #define LED_OFF_THRESHOLD  75
 
-// 토양센서 보정값
-#define SOIL_WET           50   // 아주 젖은 상태
-#define SOIL_DRY          150   // 마른 상태
+// 펌프 히스테리시스 기준
+#define PUMP_ON_SOIL       35
+#define PUMP_OFF_SOIL      45
 
-// 급수 설정
-#define WATER_THRESHOLD    40   // soil %가 40 미만이면 급수 후보
-#define PUMP_DURATION_MS 3000UL // 3초 급수
-#define PUMP_COOLDOWN_MS 60000UL // 급수 후 60초 대기
+// 펌프 동작 시간 / 쿨타임
+#define PUMP_DURATION_MS   3000UL
+#define PUMP_COOLDOWN_MS   60000UL
+
+// 토양센서 보정값
+#define SOIL_DRY          150
+#define SOIL_WET           50
+
+// MOSFET 제어 신호
+#define PUMP_ON_SIGNAL    HIGH
+#define PUMP_OFF_SIGNAL   LOW
 
 DHT dht(DHT_PIN, DHT_TYPE);
 Adafruit_INA3221 ina3221;
@@ -45,13 +52,13 @@ Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 unsigned long lastSendTime = 0;
 unsigned long lastPrintTime = 0;
 
-bool ina3221OK = false;
-bool ledOnState = false;
-
-// 펌프 상태 관리
-bool pumpRunning = false;
 unsigned long pumpStartTime = 0;
 unsigned long lastPumpEndTime = 0;
+
+bool ina3221OK = false;
+bool ledOnState = false;
+bool pumpRunning = false;
+bool pumpLockUntilRecovered = false;
 
 // ----------------------------
 // 유틸
@@ -65,9 +72,6 @@ int calcLight() {
   return map(analogRead(LDR_PIN), 0, 1023, 0, 100);
 }
 
-// ----------------------------
-// 토양센서
-// ----------------------------
 int readSoilRaw() {
   return analogRead(SOIL_PIN);
 }
@@ -84,24 +88,19 @@ int estimateSOC(float voltage) {
   return (int)soc;
 }
 
-// 0: 긴급절전, 1: 절약모드, 2: 풀가동
 uint8_t calcMode(int soc) {
   if (soc < 20) return 0;
   if (soc < 60) return 1;
   return 2;
 }
 
-bool calcWaterAlert(int soilPercent) {
-  return soilPercent < WATER_THRESHOLD;
-}
-
 // ----------------------------
-// LED 히스테리시스
+// LED 로직
 // ----------------------------
 bool shouldLedOnHysteresis(int light, uint8_t mode) {
   if (mode == 0) {
     ledOnState = false;
-    return ledOnState;
+    return false;
   }
 
   if (light <= LED_ON_THRESHOLD) {
@@ -109,63 +108,34 @@ bool shouldLedOnHysteresis(int light, uint8_t mode) {
   } else if (light >= LED_OFF_THRESHOLD) {
     ledOnState = false;
   }
+
   return ledOnState;
 }
 
-void updateNeoPixelPurple(bool ledOn) {
-  int brightness = ledOn ? 100 : 0;
+int calcLedBrightness(int light, uint8_t mode, int soc) {
+  if (light >= LED_OFF_THRESHOLD) return 0;
+  if (mode == 0) return 0;
 
+  if (soc < 60) return 60;
+  return 100;
+}
+
+void updateNeoPixelPurple(int brightness) {
   strip.setBrightness(brightness);
 
   for (int i = 0; i < NUM_PIXELS; i++) {
-    strip.setPixelColor(i, ledOn ? strip.Color(180, 0, 255) : 0);
+    if (brightness > 0) {
+      strip.setPixelColor(i, strip.Color(180, 0, 255));
+    } else {
+      strip.setPixelColor(i, 0);
+    }
   }
 
   strip.show();
 }
 
-// ----------------------------
-// 펌프 제어
-// ----------------------------
-void updatePumpControl(bool waterAlert, int soc, float battery_voltage_V) {
-  unsigned long now = millis();
-
-  // 이미 펌프 작동 중이면 3초 후 종료
-  if (pumpRunning) {
-    if (now - pumpStartTime >= PUMP_DURATION_MS) {
-      digitalWrite(PUMP_PIN, LOW);
-      pumpRunning = false;
-      lastPumpEndTime = now;
-    }
-    return;
-  }
-
-  // 배터리 측정 실패면 급수 금지
-  if (battery_voltage_V < 1.0) {
-    digitalWrite(PUMP_PIN, LOW);
-    return;
-  }
-
-  // SOC 낮으면 급수 금지
-  if (soc <= 20) {
-    digitalWrite(PUMP_PIN, LOW);
-    return;
-  }
-
-  // 쿨다운 중이면 급수 금지
-  if (now - lastPumpEndTime < PUMP_COOLDOWN_MS) {
-    digitalWrite(PUMP_PIN, LOW);
-    return;
-  }
-
-  // 토양 부족하면 3초 급수 시작
-  if (waterAlert) {
-    digitalWrite(PUMP_PIN, HIGH);
-    pumpRunning = true;
-    pumpStartTime = now;
-  } else {
-    digitalWrite(PUMP_PIN, LOW);
-  }
+bool calcWaterAlert(int soilPercent) {
+  return soilPercent < PUMP_ON_SOIL;
 }
 
 // ----------------------------
@@ -177,7 +147,7 @@ void setup() {
   Wire.begin();
 
   pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);  // 시작 시 무조건 OFF
 
   pinMode(SOIL_PIN, INPUT);
   pinMode(LDR_PIN, INPUT);
@@ -198,15 +168,13 @@ void setup() {
 
   lastSendTime = millis() - SEND_INTERVAL;
   lastPrintTime = 0;
+  lastPumpEndTime = 0;
 }
 
 // ----------------------------
 // loop
 // ----------------------------
 void loop() {
-  // ----------------------------
-  // 센서 읽기
-  // ----------------------------
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
 
@@ -214,13 +182,9 @@ void loop() {
   if (isnan(humidity)) humidity = 0.0;
 
   int light = calcLight();
-
   int soilRaw = readSoilRaw();
   int soil = calcSoilPercent(soilRaw);
 
-  // ----------------------------
-  // INA3221 - 태양광 / 배터리
-  // ----------------------------
   float solar_voltage_V = 0.0;
   float solar_current_A = 0.0;
   float solar_power_W   = 0.0;
@@ -239,14 +203,11 @@ void loop() {
     battery_power_W   = sanitizeFloat(battery_voltage_V * battery_current_A);
   }
 
-  // ----------------------------
-  // 상태 판단
-  // ----------------------------
   int soc = estimateSOC(battery_voltage_V);
 
   uint8_t mode;
   if (battery_voltage_V < 1.0) {
-    mode = 2;  // 측정 실패 시 보수적으로 절전
+    mode = 2;  // 테스트용 fallback
   } else {
     mode = calcMode(soc);
   }
@@ -254,17 +215,50 @@ void loop() {
   bool waterAlert = calcWaterAlert(soil);
 
   // ----------------------------
-  // 제어 로직
+  // LED 제어
   // ----------------------------
-  updatePumpControl(waterAlert, soc, battery_voltage_V);
-
   bool ledOn = shouldLedOnHysteresis(light, mode);
-  int ledBrightness = ledOn ? 100 : 0;
+  int ledBrightness = ledOn ? calcLedBrightness(light, mode, soc) : 0;
+  updateNeoPixelPurple(ledBrightness);
 
-  updateNeoPixelPurple(ledOn);
+  // ----------------------------
+  // 펌프 제어
+  // ----------------------------
 
-  int pumpState = digitalRead(PUMP_PIN);
-  int ledState = ledOn ? 1 : 0;
+  // 흙이 충분히 회복되면 락 해제
+  if (soil >= PUMP_OFF_SOIL) {
+    pumpLockUntilRecovered = false;
+  }
+
+  // 긴급절전이면 펌프 금지
+  bool pumpAllowed = (mode != 0);
+
+  // 펌프 동작 중이면 3초 후 정지
+  if (pumpRunning) {
+    if (millis() - pumpStartTime >= PUMP_DURATION_MS) {
+      pumpRunning = false;
+      digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);
+      lastPumpEndTime = millis();
+      pumpLockUntilRecovered = true;
+    }
+  }
+
+  // 새 급수 시작 조건
+  bool soilNeedWater = (soil <= PUMP_ON_SOIL);
+  bool cooldownDone = (millis() - lastPumpEndTime >= PUMP_COOLDOWN_MS);
+
+  if (!pumpRunning &&
+      pumpAllowed &&
+      soilNeedWater &&
+      !pumpLockUntilRecovered &&
+      cooldownDone) {
+    pumpRunning = true;
+    pumpStartTime = millis();
+    digitalWrite(PUMP_PIN, PUMP_ON_SIGNAL);
+  }
+
+  int pumpState = pumpRunning ? 1 : 0;
+  int ledState = (ledBrightness > 0) ? 1 : 0;
 
   // ----------------------------
   // 디버그 출력
@@ -272,10 +266,16 @@ void loop() {
   if (millis() - lastPrintTime >= 10000UL) {
     lastPrintTime = millis();
 
+    unsigned long cooldownRemaining = 0;
+    if (!pumpRunning && (millis() - lastPumpEndTime < PUMP_COOLDOWN_MS)) {
+      cooldownRemaining = (PUMP_COOLDOWN_MS - (millis() - lastPumpEndTime)) / 1000UL;
+    }
+
     Serial.print(F("[DEBUG] T="));
     Serial.print(temperature, 1);
     Serial.print(F(" H="));
     Serial.print(humidity, 1);
+
     Serial.print(F(" L="));
     Serial.print(light);
 
@@ -302,10 +302,19 @@ void loop() {
     Serial.print(soc);
     Serial.print(F(" MODE="));
     Serial.print(mode);
+
     Serial.print(F(" WATER="));
     Serial.print(waterAlert ? 1 : 0);
+
     Serial.print(F(" PUMP="));
     Serial.print(pumpState);
+
+    Serial.print(F(" LOCK="));
+    Serial.print(pumpLockUntilRecovered ? 1 : 0);
+
+    Serial.print(F(" COOL_LEFT="));
+    Serial.print(cooldownRemaining);
+
     Serial.print(F(" LED="));
     Serial.print(ledState);
     Serial.print(F(" LED_B="));
