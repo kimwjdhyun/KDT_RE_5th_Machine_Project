@@ -295,7 +295,7 @@
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
-  max-height: 1050px;
+  max-height: 1315px; /* 255 * 5 + 10 * 4 */
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 6px;
@@ -486,6 +486,7 @@
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  display: flex;
 }
 
 .chart-box canvas {

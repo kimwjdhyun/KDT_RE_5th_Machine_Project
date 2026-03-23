@@ -30,8 +30,8 @@
 #define LED_OFF_THRESHOLD  75
 
 // 펌프 히스테리시스 기준
-#define PUMP_ON_SOIL       35
-#define PUMP_OFF_SOIL      45
+#define PUMP_ON_SOIL       90
+#define PUMP_OFF_SOIL      100
 
 // 펌프 동작 시간 / 쿨타임
 #define PUMP_DURATION_MS   3000UL

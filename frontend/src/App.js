@@ -92,6 +92,12 @@ function getCardStatus(type, latest) {
     return "normal";
   }
 
+  if (type === "ai_confidence") {
+    const pred = Number(latest?.pred_1h || 0);
+    if (pred <= 0) return "warning";
+    return "normal";
+  }
+
   return "";
 }
 
@@ -240,6 +246,30 @@ function App() {
     return "🔴 급변 가능";
   }, [predGap]);
 
+  const aiConfidence = useMemo(() => {
+    if (!health?.xgb_ready || !latest) {
+      return { text: "비활성", score: "-" };
+    }
+
+    const pred = Number(latest.pred_1h || 0);
+    const current = Number(latest.solar_power || 0);
+    const gap = Math.abs(pred - current);
+
+    if (pred === 0) {
+      return { text: "계산 대기", score: "-" };
+    }
+
+    if (gap < 0.2) {
+      return { text: "높음", score: "90" };
+    }
+
+    if (gap < 0.5) {
+      return { text: "보통", score: "75" };
+    }
+
+    return { text: "낮음", score: "55" };
+  }, [latest, health]);
+
   const systemSummary = useMemo(() => {
     if (!latest) return "데이터 수신 대기 중";
 
@@ -268,6 +298,7 @@ function App() {
       return {
         power: "#60a5fa",
         pred: "#fca5a5",
+        gap: "#f59e0b",
         soc: "#86efac",
         soil: "#fbbf24",
         baseline: "#fdba74",
@@ -281,6 +312,7 @@ function App() {
     return {
       power: "#2563eb",
       pred: "#dc2626",
+      gap: "#f59e0b",
       soc: "#16a34a",
       soil: "#a16207",
       baseline: "#f97316",
@@ -328,6 +360,8 @@ function App() {
     [chartPalette]
   );
 
+  // 최근 1시간(10초 간격 기준 360개)만 가져오고
+  // 그래프에는 최대 60포인트 정도만 샘플링해서 표시
   const displayLog = useMemo(() => {
     if (!Array.isArray(log) || log.length === 0) return [];
 
@@ -359,6 +393,23 @@ function App() {
           borderColor: chartPalette.pred,
           backgroundColor: dark ? "rgba(252,165,165,0.08)" : "rgba(220,38,38,0.06)",
           borderDash: [6, 6],
+          fill: true
+        }
+      ]
+    };
+  }, [labels, displayLog, chartPalette, dark]);
+
+  const errorChart = useMemo(() => {
+    return {
+      labels,
+      datasets: [
+        {
+          label: "예측 오차(|실제-예측|, W)",
+          data: displayLog.map((d) =>
+            Math.abs(Number(d.solar_power ?? 0) - Number(d.pred_1h ?? 0))
+          ),
+          borderColor: chartPalette.gap,
+          backgroundColor: dark ? "rgba(245,158,11,0.16)" : "rgba(245,158,11,0.12)",
           fill: true
         }
       ]
@@ -556,6 +607,12 @@ function App() {
           />
 
           <DashboardCard
+            title={<Title emoji="🎯" text="AI 신뢰도" />}
+            value={aiConfidence.score === "-" ? aiConfidence.text : `${aiConfidence.score}% (${aiConfidence.text})`}
+            status={getCardStatus("ai_confidence", latest)}
+          />
+
+          <DashboardCard
             title={<Title emoji="🧠" text="AI 해석" />}
             value={predictionInsight}
           />
@@ -668,6 +725,13 @@ function App() {
             <h2 className="section-title">📈 발전량 vs AI 예측 (최근 1시간)</h2>
             <div className="chart-box">
               <Line key="power" data={powerChart} options={chartOptions} />
+            </div>
+          </div>
+
+          <div className="chart-card chart-h">
+            <h2 className="section-title">📉 AI 예측 오차 강조 (최근 1시간)</h2>
+            <div className="chart-box">
+              <Line key="error" data={errorChart} options={chartOptions} />
             </div>
           </div>
 
