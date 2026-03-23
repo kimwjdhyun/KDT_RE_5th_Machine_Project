@@ -10,7 +10,7 @@
 #define NEOPIXEL_PIN      6
 #define NUM_PIXELS        60
 
-#define PUMP_PIN          8
+#define PUMP_PIN          7
 
 #define LDR_PIN           A1
 #define SOIL_PIN          A2

@@ -288,17 +288,14 @@
   display: grid;
   grid-template-columns: clamp(320px, 28vw, 420px) 1fr;
   gap: 18px;
-  align-items: stretch;
-  height: 1140px;
-  min-height: 1140px;
+  align-items: start;
 }
 
 .left-panel {
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
-  height: 100%;
-  min-height: 0;
+  max-height: 1050px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 6px;
@@ -326,21 +323,12 @@
 .right-panel {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  height: 100%;
-  min-height: 0;
-  align-items: stretch;
 }
 
 @media (min-width: 1100px) {
   .left-panel {
     grid-template-columns: 1fr 1fr;
-  }
-
-  .right-panel {
-    grid-template-columns: 1fr;
-    align-items: stretch;
   }
 }
 
@@ -468,31 +456,36 @@
   border-radius: 18px;
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
-  min-height: 0;
+  overflow: hidden;
 }
 
 .chart-card.chart-h {
-  height: 100%;
+  height: 255px;
+  min-height: 255px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .section-title {
   margin: 0 0 8px 0;
   font-size: 18px;
+  line-height: 1.2;
   flex: 0 0 auto;
 }
 
 .chart-h .chart-box {
   flex: 1;
   min-height: 0;
-  padding-bottom: 0;
+  overflow: hidden;
 }
 
 .chart-box {
   position: relative;
   width: 100%;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .chart-box canvas {
@@ -748,25 +741,24 @@
 @media (max-width: 980px) {
   .main-layout {
     grid-template-columns: 1fr;
-    height: auto;
-    min-height: 0;
   }
 
   .left-panel {
     grid-template-columns: 1fr;
-    height: auto;
+    max-height: none;
     overflow-y: visible;
     padding-right: 0;
   }
 
   .right-panel {
+    display: grid;
     grid-template-columns: 1fr;
-    grid-template-rows: none;
-    height: auto;
+    gap: 14px;
   }
 
   .chart-card.chart-h {
     height: auto;
+    min-height: 0;
   }
 
   .chart-h .chart-box {

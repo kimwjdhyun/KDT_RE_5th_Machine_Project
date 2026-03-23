@@ -120,7 +120,6 @@ function App() {
   const [prevLatestTs, setPrevLatestTs] = useState("");
   const [prevMode, setPrevMode] = useState(null);
   const [toast, setToast] = useState({ show: false, text: "", type: "info" });
-
   const [expandedHistory, setExpandedHistory] = useState({});
 
   useEffect(() => {
@@ -296,11 +295,12 @@ function App() {
     () => ({
       responsive: true,
       maintainAspectRatio: false,
+      animation: false,
       interaction: {
         mode: "index",
         intersect: false
       },
-      layout: { padding: { bottom: 12, right: 10, left: 6 } },
+      layout: { padding: { bottom: 4, right: 6, left: 4 } },
       plugins: {
         legend: {
           labels: { color: chartPalette.tick, boxWidth: 10, boxHeight: 10 }
@@ -328,9 +328,18 @@ function App() {
     [chartPalette]
   );
 
+  const displayLog = useMemo(() => {
+    if (!Array.isArray(log) || log.length === 0) return [];
+
+    const recent1h = log.slice(-360);
+    const step = Math.max(1, Math.ceil(recent1h.length / 60));
+
+    return recent1h.filter((_, i) => i % step === 0);
+  }, [log]);
+
   const labels = useMemo(
-    () => log.map((d) => (d.timestamp ? d.timestamp.slice(11, 19) : "-")),
-    [log]
+    () => displayLog.map((d) => (d.timestamp ? d.timestamp.slice(11, 19) : "-")),
+    [displayLog]
   );
 
   const powerChart = useMemo(() => {
@@ -339,14 +348,14 @@ function App() {
       datasets: [
         {
           label: "발전량(W)",
-          data: log.map((d) => d.solar_power ?? 0),
+          data: displayLog.map((d) => d.solar_power ?? 0),
           borderColor: chartPalette.power,
           backgroundColor: dark ? "rgba(96,165,250,0.10)" : "rgba(37,99,235,0.08)",
           fill: true
         },
         {
           label: "AI 예측(1h, W)",
-          data: log.map((d) => d.pred_1h ?? 0),
+          data: displayLog.map((d) => d.pred_1h ?? 0),
           borderColor: chartPalette.pred,
           backgroundColor: dark ? "rgba(252,165,165,0.08)" : "rgba(220,38,38,0.06)",
           borderDash: [6, 6],
@@ -354,7 +363,7 @@ function App() {
         }
       ]
     };
-  }, [labels, log, chartPalette, dark]);
+  }, [labels, displayLog, chartPalette, dark]);
 
   const socChart = useMemo(() => {
     return {
@@ -362,14 +371,14 @@ function App() {
       datasets: [
         {
           label: "SOC(%)",
-          data: log.map((d) => d.soc ?? 0),
+          data: displayLog.map((d) => d.soc ?? 0),
           borderColor: chartPalette.soc,
           backgroundColor: dark ? "rgba(134,239,172,0.10)" : "rgba(22,163,74,0.08)",
           fill: true
         }
       ]
     };
-  }, [labels, log, chartPalette, dark]);
+  }, [labels, displayLog, chartPalette, dark]);
 
   const soilChart = useMemo(() => {
     return {
@@ -377,21 +386,21 @@ function App() {
       datasets: [
         {
           label: "토양습도(%)",
-          data: log.map((d) => d.soil ?? 0),
+          data: displayLog.map((d) => d.soil ?? 0),
           borderColor: chartPalette.soil,
           backgroundColor: dark ? "rgba(251,191,36,0.10)" : "rgba(161,98,7,0.08)",
           fill: true
         },
         {
           label: "기준선(40%)",
-          data: log.map(() => 40),
+          data: displayLog.map(() => 40),
           borderColor: chartPalette.baseline,
           borderDash: [5, 5],
           fill: false
         }
       ]
     };
-  }, [labels, log, chartPalette, dark]);
+  }, [labels, displayLog, chartPalette, dark]);
 
   const envChart = useMemo(() => {
     return {
@@ -399,21 +408,21 @@ function App() {
       datasets: [
         {
           label: "온도(°C)",
-          data: log.map((d) => d.temperature ?? 0),
+          data: displayLog.map((d) => d.temperature ?? 0),
           borderColor: chartPalette.temp,
           backgroundColor: dark ? "rgba(192,132,252,0.08)" : "rgba(124,58,237,0.08)",
           fill: true
         },
         {
           label: "습도(%)",
-          data: log.map((d) => d.humidity ?? 0),
+          data: displayLog.map((d) => d.humidity ?? 0),
           borderColor: chartPalette.hum,
           backgroundColor: dark ? "rgba(34,211,238,0.08)" : "rgba(8,145,178,0.08)",
           fill: true
         }
       ]
     };
-  }, [labels, log, chartPalette, dark]);
+  }, [labels, displayLog, chartPalette, dark]);
 
   const modeHistory = useMemo(() => {
     const last10 = log.slice(-10);
@@ -656,30 +665,30 @@ function App() {
 
         <div className="right-panel">
           <div className="chart-card chart-h">
-            <h2 className="section-title">📈 발전량 vs AI 예측</h2>
+            <h2 className="section-title">📈 발전량 vs AI 예측 (최근 1시간)</h2>
             <div className="chart-box">
-              <Line data={powerChart} options={chartOptions} />
+              <Line key="power" data={powerChart} options={chartOptions} />
             </div>
           </div>
 
           <div className="chart-card chart-h">
-            <h2 className="section-title">🔋 SOC 변화</h2>
+            <h2 className="section-title">🔋 SOC 변화 (최근 1시간)</h2>
             <div className="chart-box">
-              <Line data={socChart} options={chartOptions} />
+              <Line key="soc" data={socChart} options={chartOptions} />
             </div>
           </div>
 
           <div className="chart-card chart-h">
-            <h2 className="section-title">🌱 토양습도 모니터링</h2>
+            <h2 className="section-title">🌱 토양습도 모니터링 (최근 1시간)</h2>
             <div className="chart-box">
-              <Line data={soilChart} options={chartOptions} />
+              <Line key="soil" data={soilChart} options={chartOptions} />
             </div>
           </div>
 
           <div className="chart-card chart-h">
-            <h2 className="section-title">🌤 온도 · 습도 변화</h2>
+            <h2 className="section-title">🌤 온도 · 습도 변화 (최근 1시간)</h2>
             <div className="chart-box">
-              <Line data={envChart} options={chartOptions} />
+              <Line key="env" data={envChart} options={chartOptions} />
             </div>
           </div>
         </div>
