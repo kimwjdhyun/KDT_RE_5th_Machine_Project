@@ -30,16 +30,16 @@
 #define LED_OFF_THRESHOLD  75
 
 // 펌프 히스테리시스 기준
-#define PUMP_ON_SOIL       90
-#define PUMP_OFF_SOIL      100
+#define PUMP_ON_SOIL       35
+#define PUMP_OFF_SOIL      45
 
 // 펌프 동작 시간 / 쿨타임
 #define PUMP_DURATION_MS   3000UL
 #define PUMP_COOLDOWN_MS   60000UL
 
 // 토양센서 보정값
-#define SOIL_DRY          150
-#define SOIL_WET           50
+#define SOIL_DRY          200
+#define SOIL_WET           100
 
 // MOSFET 제어 신호
 #define PUMP_ON_SIGNAL    HIGH
