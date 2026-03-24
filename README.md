@@ -39,9 +39,8 @@
 | 항목 | 내용 |
 |------|------|
 | 프로젝트명 | 재생에너지 기반 AI 스마트팜 에너지 최적화 및 발전량 예측 시스템 |
-| 팀 구성 | 이수빈 (AI) · 백동윤 (Hardware) · 김정현 (Web) |
-| 핵심 기술 | PyTorch LSTM · Binary Classification · Flask · Arduino UNO · Chart.js |
-| 목표 | 발전량 예측 + SOC 기반 에너지 모드 자동 전환 + 급수 알림 시스템 |
+| 팀 구성 | 이수빈 (팀원) · 백동윤 (팀원) · 김정현 (팀장) |
+| 핵심 기술 | PyTorch LSTM · 규칙 기반 제어(Rule-based) · Flask · Arduino UNO · Chart.js |
 
 ---
 

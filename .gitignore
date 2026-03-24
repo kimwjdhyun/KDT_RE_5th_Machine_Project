@@ -1,7 +1,22 @@
+# Python
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.env
-venv/
-.DS_Store
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Data
+backend/data/*.csv
+backend/data/*.json
+
+# Models
+backend/models/*.pkl
+backend/models/*.pth
+
+# Results
+backend/results/*.png
+backend/results/*.csv
+
+backend/models/
