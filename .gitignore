@@ -7,16 +7,16 @@ __pycache__/
 node_modules/
 frontend/node_modules/
 
-# Data
-backend/data/*.csv
-backend/data/*.json
+# # Data
+# backend/data/*.csv
+# backend/data/*.json
 
-# Models
-backend/models/*.pkl
-backend/models/*.pth
+# # Models
+# backend/models/*.pkl
+# backend/models/*.pth
 
-# Results
-backend/results/*.png
-backend/results/*.csv
+# # Results
+# backend/results/*.png
+# backend/results/*.csv
 
-backend/models/
+# backend/models/
