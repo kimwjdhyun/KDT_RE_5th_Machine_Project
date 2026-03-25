@@ -4,26 +4,26 @@
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 
-#define DHT_PIN           5
-#define DHT_TYPE          DHT22
+#define DHT_PIN            5
+#define DHT_TYPE           DHT22
 
-#define NEOPIXEL_PIN      6
-#define NUM_PIXELS        60
+#define NEOPIXEL_PIN       6
+#define NUM_PIXELS         60
 
-#define PUMP_PIN          7
+#define PUMP_PIN           7
 
-#define LDR_PIN           A1
-#define SOIL_PIN          A2
+#define LDR_PIN            A1
+#define SOIL_PIN           A2
 
-#define SEND_INTERVAL     10000UL
+#define SEND_INTERVAL      10000UL
 
-#define BAT_MAX_V         16.8
-#define BAT_MIN_V         10.8
+#define BAT_MAX_V          16.8
+#define BAT_MIN_V          10.8
 
 // INA3221 채널 번호
-#define INA_CH_SOLAR      0
-#define INA_CH_BATTERY    1
-#define INA_CH_SPARE      2
+#define INA_CH_SOLAR       0
+#define INA_CH_BATTERY     1
+#define INA_CH_SPARE       2
 
 // LED 히스테리시스 기준
 #define LED_ON_THRESHOLD   55
@@ -38,12 +38,15 @@
 #define PUMP_COOLDOWN_MS   60000UL
 
 // 토양센서 보정값
-#define SOIL_DRY          200
+#define SOIL_DRY           200
 #define SOIL_WET           100
 
-// MOSFET 제어 신호
-#define PUMP_ON_SIGNAL    HIGH
-#define PUMP_OFF_SIGNAL   LOW
+// 릴레이 제어 신호
+// 대부분의 1채널 릴레이 모듈은 Active LOW
+// LOW  = 릴레이 ON
+// HIGH = 릴레이 OFF
+#define PUMP_ON_SIGNAL     LOW
+#define PUMP_OFF_SIGNAL    HIGH
 
 DHT dht(DHT_PIN, DHT_TYPE);
 Adafruit_INA3221 ina3221;
@@ -94,6 +97,10 @@ uint8_t calcMode(int soc) {
   return 2;
 }
 
+bool calcWaterAlert(int soilPercent) {
+  return soilPercent < PUMP_ON_SOIL;
+}
+
 // ----------------------------
 // LED 로직
 // ----------------------------
@@ -134,10 +141,6 @@ void updateNeoPixelPurple(int brightness) {
   strip.show();
 }
 
-bool calcWaterAlert(int soilPercent) {
-  return soilPercent < PUMP_ON_SOIL;
-}
-
 // ----------------------------
 // setup
 // ----------------------------
@@ -147,7 +150,7 @@ void setup() {
   Wire.begin();
 
   pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);  // 시작 시 무조건 OFF
+  digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);   // 시작 시 무조건 OFF
 
   pinMode(SOIL_PIN, INPUT);
   pinMode(LDR_PIN, INPUT);
@@ -168,7 +171,9 @@ void setup() {
 
   lastSendTime = millis() - SEND_INTERVAL;
   lastPrintTime = 0;
-  lastPumpEndTime = 0;
+
+  // 부팅 직후 바로 첫 급수 가능하게 설정
+  lastPumpEndTime = millis() - PUMP_COOLDOWN_MS;
 }
 
 // ----------------------------
@@ -207,7 +212,7 @@ void loop() {
 
   uint8_t mode;
   if (battery_voltage_V < 1.0) {
-    mode = 2;  // 테스트용 fallback
+    mode = 2;   // 센서 테스트용 fallback
   } else {
     mode = calcMode(soc);
   }
@@ -237,7 +242,7 @@ void loop() {
   if (pumpRunning) {
     if (millis() - pumpStartTime >= PUMP_DURATION_MS) {
       pumpRunning = false;
-      digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);
+      digitalWrite(PUMP_PIN, PUMP_OFF_SIGNAL);   // 여기 중요: 종료 시 OFF
       lastPumpEndTime = millis();
       pumpLockUntilRecovered = true;
     }
@@ -254,7 +259,7 @@ void loop() {
       cooldownDone) {
     pumpRunning = true;
     pumpStartTime = millis();
-    digitalWrite(PUMP_PIN, PUMP_ON_SIGNAL);
+    digitalWrite(PUMP_PIN, PUMP_ON_SIGNAL);      // 급수 시작
   }
 
   int pumpState = pumpRunning ? 1 : 0;
@@ -328,26 +333,26 @@ void loop() {
     lastSendTime = millis();
 
     Serial.print("{");
-    Serial.print("\"temperature\":"); Serial.print(temperature, 1); Serial.print(",");
-    Serial.print("\"humidity\":"); Serial.print(humidity, 1); Serial.print(",");
-    Serial.print("\"soil_raw\":"); Serial.print(soilRaw); Serial.print(",");
-    Serial.print("\"soil\":"); Serial.print(soil); Serial.print(",");
-    Serial.print("\"light\":"); Serial.print(light); Serial.print(",");
+    Serial.print("\"temperature\":");       Serial.print(temperature, 1);       Serial.print(",");
+    Serial.print("\"humidity\":");          Serial.print(humidity, 1);          Serial.print(",");
+    Serial.print("\"soil_raw\":");          Serial.print(soilRaw);              Serial.print(",");
+    Serial.print("\"soil\":");              Serial.print(soil);                 Serial.print(",");
+    Serial.print("\"light\":");             Serial.print(light);                Serial.print(",");
 
-    Serial.print("\"solar_voltage\":"); Serial.print(solar_voltage_V, 2); Serial.print(",");
-    Serial.print("\"solar_current\":"); Serial.print(solar_current_A, 3); Serial.print(",");
-    Serial.print("\"solar_power\":"); Serial.print(solar_power_W, 3); Serial.print(",");
+    Serial.print("\"solar_voltage\":");     Serial.print(solar_voltage_V, 2);   Serial.print(",");
+    Serial.print("\"solar_current\":");     Serial.print(solar_current_A, 3);   Serial.print(",");
+    Serial.print("\"solar_power\":");       Serial.print(solar_power_W, 3);     Serial.print(",");
 
-    Serial.print("\"battery_voltage\":"); Serial.print(battery_voltage_V, 2); Serial.print(",");
-    Serial.print("\"battery_current\":"); Serial.print(battery_current_A, 3); Serial.print(",");
-    Serial.print("\"battery_power\":"); Serial.print(battery_power_W, 3); Serial.print(",");
+    Serial.print("\"battery_voltage\":");   Serial.print(battery_voltage_V, 2); Serial.print(",");
+    Serial.print("\"battery_current\":");   Serial.print(battery_current_A, 3); Serial.print(",");
+    Serial.print("\"battery_power\":");     Serial.print(battery_power_W, 3);   Serial.print(",");
 
-    Serial.print("\"pump\":"); Serial.print(pumpState); Serial.print(",");
-    Serial.print("\"led\":"); Serial.print(ledState); Serial.print(",");
-    Serial.print("\"led_brightness\":"); Serial.print(ledBrightness); Serial.print(",");
-    Serial.print("\"soc\":"); Serial.print(soc); Serial.print(",");
-    Serial.print("\"mode\":"); Serial.print(mode); Serial.print(",");
-    Serial.print("\"water_alert\":"); Serial.print(waterAlert ? 1 : 0);
+    Serial.print("\"pump\":");              Serial.print(pumpState);            Serial.print(",");
+    Serial.print("\"led\":");               Serial.print(ledState);             Serial.print(",");
+    Serial.print("\"led_brightness\":");    Serial.print(ledBrightness);        Serial.print(",");
+    Serial.print("\"soc\":");               Serial.print(soc);                  Serial.print(",");
+    Serial.print("\"mode\":");              Serial.print(mode);                 Serial.print(",");
+    Serial.print("\"water_alert\":");       Serial.print(waterAlert ? 1 : 0);
     Serial.println("}");
   }
 
