@@ -360,8 +360,6 @@ function App() {
     [chartPalette]
   );
 
-  // 최근 1시간(10초 간격 기준 360개)만 가져오고
-  // 그래프에는 최대 60포인트 정도만 샘플링해서 표시
   const displayLog = useMemo(() => {
     if (!Array.isArray(log) || log.length === 0) return [];
 
@@ -567,7 +565,7 @@ function App() {
       </div>
 
       <div className="status-badges">
-        <div className="badge badge-energy">🧾 상태 요약: {systemSummary}</div>
+        <div className="badge badge-summary">🧾 상태 요약: {systemSummary}</div>
       </div>
 
       {errorMsg && <div className="error-banner">⚠ {errorMsg}</div>}

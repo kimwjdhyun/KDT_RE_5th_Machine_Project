@@ -10,15 +10,8 @@ import joblib
 import numpy as np
 import pandas as pd
 import serial
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
-
-# =========================================================
-# Flask 앱 설정
-# - CORS 허용: 프론트엔드에서 API 호출 가능하도록 설정
-# =========================================================
-app = Flask(__name__)
-CORS(app)
 
 # =========================================================
 # 경로 설정
@@ -26,6 +19,12 @@ CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
+
+# React build 결과물 경로
+FRONTEND_BUILD_DIR = os.path.abspath(
+    os.path.join(BASE_DIR, "..", "frontend", "build")
+)
+FRONTEND_STATIC_DIR = os.path.join(FRONTEND_BUILD_DIR, "static")
 
 JSON_FILE = os.path.join(DATA_DIR, "sensor_log.json")
 CSV_FILE = os.path.join(DATA_DIR, "sensor_log.csv")
@@ -35,17 +34,23 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # =========================================================
+# Flask 앱 설정
+# =========================================================
+app = Flask(
+    __name__,
+    static_folder=FRONTEND_STATIC_DIR,
+    static_url_path="/static"
+)
+CORS(app)
+
+# =========================================================
 # 시리얼 통신 설정
-# - Arduino가 연결된 포트와 baud rate
 # =========================================================
 SERIAL_PORT = "COM3"
 BAUD_RATE = 9600
 
 # =========================================================
 # 메모리 캐시
-# - latest_row       : 가장 최근 센서 데이터 1개
-# - history_memory   : 프론트 응답용 최근 데이터 목록
-# - recent_raw_buffer: 실시간 예측 feature 생성용 원본 버퍼
 # =========================================================
 latest_row = None
 history_memory = deque(maxlen=300)
@@ -100,7 +105,7 @@ def safe_int(value, default=0):
 def normalize_row(row: dict) -> dict:
     """
     센서 row를 프로젝트 표준 19개 컬럼 구조로 맞춘다.
-    JSON/CSV/메모리 저장 형식을 항상 동일하게 유지하는 역할.
+    JSON/CSV/메모리 저장 형식을 항상 동일하게 유지한다.
     """
     if not isinstance(row, dict):
         return None
@@ -131,13 +136,11 @@ def normalize_row(row: dict) -> dict:
         "water_alert": safe_int(row.get("water_alert", 0), 0),
     }
 
-    # 발전량이 비어 있으면 전압 * 전류로 보정
     if normalized["solar_power"] <= 0:
         normalized["solar_power"] = round(
             max(0.0, normalized["solar_voltage"] * normalized["solar_current"]), 2
         )
 
-    # 배터리 전력도 비어 있으면 전압 * 전류로 계산
     if normalized["battery_power"] == 0 and (
         normalized["battery_voltage"] != 0 or normalized["battery_current"] != 0
     ):
@@ -154,7 +157,7 @@ def normalize_row(row: dict) -> dict:
 def load_xgb_model():
     """
     train_xgboost.py에서 저장한 xgboost_model.pkl을 불러온다.
-    모델 자체뿐 아니라 feature_cols, resample_rule 같은 설정도 함께 읽는다.
+    모델뿐 아니라 feature_cols, resample_rule 같은 설정도 함께 읽는다.
     """
     global xgb_model, xgb_feature_cols, xgb_pred_step
     global xgb_resample_rule, xgb_day_power_threshold
@@ -296,7 +299,6 @@ def load_recent_csv_rows(max_rows=1000):
     """
     서버 시작 시 최근 CSV 데이터를 읽어
     recent_raw_buffer와 history_memory를 복원할 때 사용한다.
-    JSON보다 CSV가 더 길게 쌓여 있으므로 실시간 예측 버퍼 복원에 유리하다.
     """
     if not os.path.exists(CSV_FILE):
         return []
@@ -332,10 +334,6 @@ def build_live_feature_from_buffer():
     """
     recent_raw_buffer에 쌓인 최근 원본 데이터를 이용해
     현재 시점 예측용 feature 1줄을 만든다.
-
-    주의:
-    - 현재 모델은 base_trend 계열 feature를 쓸 수 있으므로
-      5분 리샘플 후 최소 24행 정도는 있어야 rolling 24 계산이 가능하다.
     """
     if not xgb_ready:
         return None
@@ -374,18 +372,15 @@ def build_live_feature_from_buffer():
 
         df["battery_power"] = df["battery_power"].fillna(df["battery_voltage"] * df["battery_current"])
 
-        # 학습과 동일한 5분 리샘플
         df = df.set_index("timestamp")
         df = df.resample(xgb_resample_rule).mean(numeric_only=True)
         df = df.dropna(how="all").reset_index()
 
         print(f"[XGB] resampled rows={len(df)}")
 
-        # rolling 24 계산 가능하도록 최소 24행 필요
         if len(df) < 24:
             return None
 
-        # 시간 파생변수
         df["hour"] = df["timestamp"].dt.hour
         df["minute"] = df["timestamp"].dt.minute
         df["dayofweek"] = df["timestamp"].dt.dayofweek
@@ -395,12 +390,10 @@ def build_live_feature_from_buffer():
         df["minute_sin"] = np.sin(2 * np.pi * df["minute"] / 60)
         df["minute_cos"] = np.cos(2 * np.pi * df["minute"] / 60)
 
-        # lag feature
         for lag in [1, 2, 3, 6, 12]:
             df[f"power_lag_{lag}"] = df["solar_power"].shift(lag)
             df[f"light_lag_{lag}"] = df["light"].shift(lag)
 
-        # rolling feature
         for window in [3, 6, 12, 24]:
             df[f"power_mean_{window}"] = df["solar_power"].rolling(window).mean()
             df[f"power_std_{window}"] = df["solar_power"].rolling(window).std()
@@ -410,7 +403,6 @@ def build_live_feature_from_buffer():
         for window in [3, 6, 12]:
             df[f"light_mean_{window}"] = df["light"].rolling(window).mean()
 
-        # 변화량 feature
         df["power_diff_1"] = df["solar_power"].diff(1)
         df["power_diff_3"] = df["solar_power"].diff(3)
         df["power_diff_6"] = df["solar_power"].diff(6)
@@ -418,7 +410,6 @@ def build_live_feature_from_buffer():
         df["light_diff_1"] = df["light"].diff(1)
         df["light_diff_3"] = df["light"].diff(3)
 
-        # 기타 파생 feature
         df["voltage_current_mul"] = df["solar_voltage"] * df["solar_current"]
         df["battery_eff_gap"] = df["battery_voltage"] - df["solar_voltage"]
         df["is_day_by_hour"] = ((df["hour"] >= 6) & (df["hour"] <= 18)).astype(int)
@@ -445,9 +436,6 @@ def build_live_feature_from_buffer():
 
 
 def predict_power_1h_xgb():
-    """
-    최근 버퍼 기준으로 1시간 후 발전량 예측값 반환
-    """
     if not xgb_ready:
         return 0.0
 
@@ -557,11 +545,9 @@ def serial_reader():
 
                     print("[RAW]", raw)
 
-                    # 디버그성 메시지는 무시
                     if raw.startswith("[DEBUG]") or raw.startswith("[MASTER]") or raw.startswith("[INA"):
                         continue
 
-                    # JSON 문자열만 실제 데이터로 처리
                     if raw.startswith("{") and raw.endswith("}"):
                         try:
                             data = json.loads(raw)
@@ -587,6 +573,42 @@ def serial_reader():
         except Exception as e:
             print("[예상치 못한 오류]", e)
             time.sleep(3)
+
+
+# =========================================================
+# React build 서빙
+# =========================================================
+@app.route("/", methods=["GET"])
+def serve_dashboard():
+    index_path = os.path.join(FRONTEND_BUILD_DIR, "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(FRONTEND_BUILD_DIR, "index.html")
+    return (
+        "React build 파일이 없습니다. frontend 폴더에서 npm run build를 먼저 실행하세요.",
+        404,
+    )
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return ("", 204)
+
+
+@app.route("/<path:path>", methods=["GET"])
+def serve_react_assets(path):
+    """
+    React build 파일 및 라우팅 대응
+    """
+    requested_path = os.path.join(FRONTEND_BUILD_DIR, path)
+
+    if os.path.exists(requested_path) and os.path.isfile(requested_path):
+        return send_from_directory(FRONTEND_BUILD_DIR, path)
+
+    index_path = os.path.join(FRONTEND_BUILD_DIR, "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(FRONTEND_BUILD_DIR, "index.html")
+
+    return jsonify({"error": "frontend build not found"}), 404
 
 
 # =========================================================
@@ -708,6 +730,8 @@ def csv_status():
         "xgb_model_file": XGB_MODEL_FILE,
         "xgb_ready": xgb_ready,
         "feature_set_name": xgb_feature_set_name,
+        "frontend_build_dir": FRONTEND_BUILD_DIR,
+        "frontend_build_exists": os.path.exists(FRONTEND_BUILD_DIR),
     })
 
 
@@ -718,14 +742,12 @@ if __name__ == "__main__":
     ensure_csv_exists()
     load_xgb_model()
 
-    # 1) history_memory는 최근 JSON 300개 유지
     loaded_logs = load_logs()[-300:]
     for row in loaded_logs:
         nrow = normalize_row(row)
         if nrow is not None:
             history_memory.append(nrow)
 
-    # 2) 예측용 버퍼는 CSV에서 최근 1000개 복원
     recent_rows = load_recent_csv_rows(1000)
     for row in recent_rows:
         nrow = normalize_row(row)
@@ -739,6 +761,8 @@ if __name__ == "__main__":
 
     print(f"[INIT] history_memory={len(history_memory)}")
     print(f"[INIT] recent_raw_buffer={len(recent_raw_buffer)}")
+    print(f"[INIT] frontend_build_dir={FRONTEND_BUILD_DIR}")
+    print(f"[INIT] frontend_build_exists={os.path.exists(FRONTEND_BUILD_DIR)}")
 
     t = threading.Thread(target=serial_reader, daemon=True)
     t.start()

@@ -273,10 +273,24 @@
   color: #075985;
 }
 
+/* 기존 경고용 에너지 배지 */
 .badge-energy {
   background: #fff1f2;
   border-color: #fecdd3;
   color: #9f1239;
+}
+
+/* 상태 요약 전용 배지 */
+.badge-summary {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #047857;
+}
+
+.theme-dark .badge-summary {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(134, 239, 172, 0.28);
+  color: #86efac;
 }
 
 /* =========================
@@ -295,7 +309,7 @@
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
-  max-height: 1315px; /* 255 * 5 + 10 * 4 */
+  max-height: 1315px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 6px;
