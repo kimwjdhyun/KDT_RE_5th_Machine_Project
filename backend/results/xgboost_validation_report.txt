@@ -1,0 +1,35 @@
+=== XGBoost 1시간 후 발전량 예측 검증 결과 ===
+평가 샘플 수: 2463
+MAE      : 0.1804
+RMSE     : 0.3758
+R2 Score : 0.4249
+최대 오차 : 2.0570
+최소 오차 : 0.0000
+실제 평균 : 0.2023
+예측 평균 : 0.2843
+
+=== 시간대별 MAE ===
+00시 | samples=107 | MAE=0.0183 | actual_mean=0.0045 | pred_mean=0.0221
+01시 | samples=108 | MAE=0.0186 | actual_mean=0.0044 | pred_mean=0.0223
+02시 | samples=108 | MAE=0.0215 | actual_mean=0.0044 | pred_mean=0.0252
+03시 | samples=108 | MAE=0.0253 | actual_mean=0.0044 | pred_mean=0.0290
+04시 | samples=108 | MAE=0.0301 | actual_mean=0.0044 | pred_mean=0.0337
+05시 | samples=108 | MAE=0.0325 | actual_mean=0.0049 | pred_mean=0.0360
+06시 | samples=108 | MAE=0.0274 | actual_mean=0.0144 | pred_mean=0.0325
+07시 | samples=108 | MAE=0.0294 | actual_mean=0.0217 | pred_mean=0.0380
+08시 | samples=98 | MAE=0.0511 | actual_mean=0.0261 | pred_mean=0.0703
+09시 | samples=89 | MAE=0.0502 | actual_mean=0.0249 | pred_mean=0.0641
+10시 | samples=96 | MAE=0.4750 | actual_mean=0.3024 | pred_mean=0.5349
+11시 | samples=114 | MAE=0.9133 | actual_mean=0.8105 | pred_mean=0.9618
+12시 | samples=120 | MAE=0.5963 | actual_mean=0.9736 | pred_mean=1.1913
+13시 | samples=112 | MAE=0.4980 | actual_mean=1.0402 | pred_mean=1.2395
+14시 | samples=105 | MAE=0.5369 | actual_mean=1.0434 | pred_mean=1.1680
+15시 | samples=108 | MAE=0.3796 | actual_mean=0.1305 | pred_mean=0.4618
+16시 | samples=108 | MAE=0.1176 | actual_mean=0.0368 | pred_mean=0.1541
+17시 | samples=100 | MAE=0.0863 | actual_mean=0.0116 | pred_mean=0.0979
+18시 | samples=97 | MAE=0.0549 | actual_mean=0.0061 | pred_mean=0.0607
+19시 | samples=85 | MAE=0.0491 | actual_mean=0.0071 | pred_mean=0.0555
+20시 | samples=83 | MAE=0.0232 | actual_mean=0.0066 | pred_mean=0.0292
+21시 | samples=93 | MAE=0.0198 | actual_mean=0.0052 | pred_mean=0.0244
+22시 | samples=95 | MAE=0.0209 | actual_mean=0.0051 | pred_mean=0.0250
+23시 | samples=97 | MAE=0.0206 | actual_mean=0.0049 | pred_mean=0.0247

@@ -10,7 +10,7 @@
 #define NEOPIXEL_PIN       6
 #define NUM_PIXELS         60
 
-#define PUMP_PIN           7
+#define PUMP_PIN           10
 
 #define LDR_PIN            A1
 #define SOIL_PIN           A2
@@ -34,7 +34,7 @@
 #define PUMP_OFF_SOIL      45
 
 // 펌프 동작 시간 / 쿨타임
-#define PUMP_DURATION_MS   3000UL
+#define PUMP_DURATION_MS   5000UL
 #define PUMP_COOLDOWN_MS   60000UL
 
 // 토양센서 보정값
