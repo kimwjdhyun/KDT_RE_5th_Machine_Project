@@ -2,10 +2,10 @@
 
 > AI 예측을 실제 제어 시스템 동작으로 연결한 에너지 관리 프로젝트
 
-[![Python](https://img.shields.io/badge/Python-3.x-blue?style=flat-square)](https://python.org)
-[![Flask](https://img.shields.io/badge/Flask-REST_API-lightgrey?style=flat-square)](https://flask.palletsprojects.com)
-[![XGBoost](https://img.shields.io/badge/Model-XGBoost-orange?style=flat-square)](https://xgboost.readthedocs.io)
-[![React](https://img.shields.io/badge/Frontend-React-61dafb?style=flat-square)](https://reactjs.org)
+[![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Flask](https://img.shields.io/badge/Flask-000000?style=flat-square&logo=flask&logoColor=white)](https://flask.palletsprojects.com)
+[![XGBoost](https://img.shields.io/badge/XGBoost-ED8B00?style=flat-square&logoColor=white)](https://xgboost.readthedocs.io)
+[![React](https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB)](https://reactjs.org)
 
 ---
 
